@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import {
   ShieldCheck, FolderOpen,
   Database, Languages, ExternalLink, CheckCircle2, AlertCircle,
-  RefreshCw, Save, Eye, EyeOff,
+  RefreshCw, Save, Eye, EyeOff, Users,
 } from "lucide-react";
 import { Button } from "./ui/Button";
 import { Input } from "./ui/Input";
@@ -142,7 +142,6 @@ export function Settings({ settings, onSave, saving }: SettingsProps) {
   }
 
   return (
-    // Full-height scrollable container
     <div className="h-full overflow-y-auto scrollbar-thin pr-1">
       <div className="max-w-2xl space-y-8 pb-24">
         <h1 className="text-3xl font-bold tracking-tight mt-4">Settings</h1>
@@ -274,6 +273,25 @@ export function Settings({ settings, onSave, saving }: SettingsProps) {
             hint="Leave empty to use system default magnet handler" />
         </Section>
 
+        {/* Sync Watch */}
+        <Section icon={<Users className="w-5 h-5" />} title="Sync Watch">
+          <Input
+            label="Display Nickname"
+            value={local.nickname ?? ""}
+            onChange={(e) => set("nickname", e.target.value)}
+            placeholder="Your display name in watch rooms"
+          />
+          <Divider />
+          <Input
+            label="Hub Server URL"
+            value={local.hub_url ?? "https://anitrack-hub.onrender.com"}
+            onChange={(e) => set("hub_url", e.target.value)}
+            placeholder="https://anitrack-hub.onrender.com"
+            mono
+            hint="The sync server all users must connect to. Leave default unless self-hosting."
+          />
+        </Section>
+
         {/* Appearance */}
         <Section icon={<Languages className="w-5 h-5" />} title="Appearance">
           <div className="space-y-2">
@@ -289,10 +307,6 @@ export function Settings({ settings, onSave, saving }: SettingsProps) {
               ))}
             </div>
           </div>
-          <Divider />
-          <Input label="Display Nickname (for Sync Watch)" value={local.nickname ?? ""}
-            onChange={(e) => set("nickname", e.target.value)}
-            placeholder="Your display name in watch rooms" />
         </Section>
 
         {/* Data Management */}

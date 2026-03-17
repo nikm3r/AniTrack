@@ -4,15 +4,12 @@ const fs = require("fs");
 /** @type {import('@electron-forge/shared-types').ForgeConfig} */
 const config = {
   packagerConfig: {
-    asar: true,
+    asar: {
+      // Unpack native modules so they can be loaded outside the asar
+      unpack: "**/*.node",
+      unpackDir: "{node_modules/better-sqlite3,node_modules/bindings,node_modules/file-uri-to-path}",
+    },
     icon: "./icon",
-    extraResource: [
-      "./dist-server",
-      "./node_modules/better-sqlite3",
-      // bindings and file-uri-to-path only if they exist as top-level packages
-      ...(fs.existsSync("./node_modules/bindings") ? ["./node_modules/bindings"] : []),
-      ...(fs.existsSync("./node_modules/file-uri-to-path") ? ["./node_modules/file-uri-to-path"] : []),
-    ],
     ignore: [
       /^\/src/,
       /^\/server/,
