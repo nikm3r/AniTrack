@@ -17,11 +17,18 @@ function epLabel(n: number): string {
   return `Episode ${String(n).padStart(2, "0")}`;
 }
 
-function guessEpisode(filename: string): number | null {
+function guessEpisode(filename: string, totalEpisodes?: number | null): number | null {
+  const base = filename.split("/").pop()?.split("\\").pop() || filename;
+  // Strip hex hashes like [E44435E5] before matching
+  const clean = base.replace(/\.[^.]+$/, "").replace(/\[[0-9A-Fa-f]{6,8}\]/g, "").trim();
   const patterns = [/[Ee][Pp]?(\d{1,3})/, / - (\d{2,3})[\s\[.]/, /\s(\d{2,3})[\s\[.]/, /_(\d{2,3})[_\[.]/];
   for (const re of patterns) {
-    const m = filename.match(re);
-    if (m) return parseInt(m[1], 10);
+    const m = clean.match(re);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (totalEpisodes && n > totalEpisodes) continue;
+      return n;
+    }
   }
   return null;
 }

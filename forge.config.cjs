@@ -5,7 +5,6 @@ const fs = require("fs");
 const config = {
   packagerConfig: {
     asar: {
-      // Unpack native modules so they can be loaded outside the asar
       unpack: "**/*.node",
       unpackDir: "{node_modules/better-sqlite3,node_modules/bindings,node_modules/file-uri-to-path}",
     },
@@ -49,6 +48,19 @@ const config = {
           homepage: "https://github.com/nikm3r/AniTrack",
           icon: "./icon.png",
           categories: ["Utility"],
+          license: "MIT",
+        },
+      },
+    },
+    {
+      name: "@reforged/maker-appimage",
+      platforms: ["linux"],
+      config: {
+        options: {
+          name: "anitrack",
+          productName: "AniTrack",
+          icon: "./icon.png",
+          categories: ["AudioVideo"],
           license: "MIT",
         },
       },

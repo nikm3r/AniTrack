@@ -28,7 +28,11 @@ function clearSession() {
   session = null;
 }
 
-function guessEpisode(filename: string): number | null {
+function guessEpisode(filename: string, totalEpisodes?: number | null): number | null {
+  const base = path.basename(filename);
+  // Strip hex hashes like [E44435E5] and [1CDE4167] before matching
+  const clean = base.replace(/\.[^.]+$/, "").replace(/\[[0-9A-Fa-f]{6,8}\]/g, "").trim();
+
   const patterns = [
     /[Ee][Pp]?(\d{1,3})/,
     / - (\d{2,3})[\s\[.]/,
@@ -36,8 +40,12 @@ function guessEpisode(filename: string): number | null {
     /_(\d{2,3})[_\[.]/,
   ];
   for (const re of patterns) {
-    const m = path.basename(filename).match(re);
-    if (m) return parseInt(m[1], 10);
+    const m = clean.match(re);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (totalEpisodes && n > totalEpisodes) continue;
+      return n;
+    }
   }
   return null;
 }
@@ -144,7 +152,7 @@ router.post("/launch", async (req: Request, res: Response) => {
     return;
   }
 
-  const episode = guessEpisode(filePath);
+  const episode = guessEpisode(filePath, anime.total_episodes);
   const trackAfterMs = Math.max(30, trackingDelaySecs) * 1000;
 
   let proc: ChildProcess | null = null;
