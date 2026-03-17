@@ -52,19 +52,6 @@ const config = {
         },
       },
     },
-    {
-      name: "@reforged/maker-appimage",
-      platforms: ["linux"],
-      config: {
-        options: {
-          name: "anitrack",
-          productName: "AniTrack",
-          icon: "./icon.png",
-          categories: ["AudioVideo"],
-          license: "MIT",
-        },
-      },
-    },
     ...(os.platform() === "linux" && fs.existsSync("/var/lib/rpm")
       ? [{
           name: "@electron-forge/maker-rpm",
