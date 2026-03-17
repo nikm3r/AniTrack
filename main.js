@@ -16,9 +16,19 @@ function findNode() {
     "/usr/local/bin/node",
     "/opt/homebrew/bin/node",
     "C:\\Program Files\\nodejs\\node.exe",
+    "C:\\Program Files (x86)\\nodejs\\node.exe",
+    path.join(process.env.APPDATA || "", "nvm", "current", "node.exe"),
+    path.join(process.env.ProgramFiles || "", "nodejs", "node.exe"),
   ];
   for (const p of candidates) {
     try { if (fs.existsSync(p)) return p; } catch { }
+  }
+  // Last resort — try to find node in PATH on Windows
+  if (process.platform === "win32") {
+    try {
+      const result = require("child_process").execSync("where node", { encoding: "utf8" }).trim().split("\n")[0].trim();
+      if (result) return result;
+    } catch { }
   }
   return "node";
 }
