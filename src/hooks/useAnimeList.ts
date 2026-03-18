@@ -17,7 +17,7 @@ export function useAnimeList(options: UseAnimeListOptions = {}) {
     setLoading(true);
     setError(null);
     try {
-      const params = new URLSearchParams({ limit: "500" });
+      const params = new URLSearchParams({ limit: "9999" });
       if (status) params.set("status", status);
       const res = await api.get<{ data: Anime[] }>(`/api/anime?${params}`);
       setAnime(res.data);

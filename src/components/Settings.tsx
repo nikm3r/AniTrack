@@ -13,6 +13,7 @@ interface SettingsProps {
   settings: AppSettings;
   onSave: (updates: Partial<AppSettings>) => Promise<boolean>;
   saving: boolean;
+  onSyncComplete?: () => void;
 }
 
 interface AniListUser {
@@ -41,7 +42,7 @@ function Divider() {
   return <div className="border-t border-white/5" />;
 }
 
-export function Settings({ settings, onSave, saving }: SettingsProps) {
+export function Settings({ settings, onSave, saving, onSyncComplete }: SettingsProps) {
   const [local, setLocal] = useState<any>(settings);
   const [showToken, setShowToken] = useState(false);
   const [anilistUser, setAnilistUser] = useState<AniListUser | null>(null);
@@ -94,6 +95,7 @@ export function Settings({ settings, onSave, saving }: SettingsProps) {
         "/api/tracker/import-list", { tracker: "anilist" }
       );
       setSyncResult(`Synced ${res.synced} anime (${res.new} new, ${res.updated} updated)`);
+      onSyncComplete?.();
     } catch (e) {
       setSyncResult(`Sync failed: ${e instanceof Error ? e.message : "Unknown error"}`);
     } finally {

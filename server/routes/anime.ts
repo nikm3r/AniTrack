@@ -31,7 +31,7 @@ router.get("/", (req: Request, res: Response) => {
   sql += " ORDER BY updated_at DESC";
 
   const pageNum = Math.max(1, parseInt(String(page), 10));
-  const limitNum = Math.min(500, Math.max(1, parseInt(String(limit), 10)));
+  const limitNum = Math.max(1, parseInt(String(limit), 10));
   const offset = (pageNum - 1) * limitNum;
   sql += " LIMIT ? OFFSET ?";
   params.push(limitNum, offset);

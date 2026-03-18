@@ -166,6 +166,9 @@ router.post("/import-list", async (req: Request, res: Response) => {
     let synced = 0;
     let updated = 0;
     let newCount = 0;
+    // Purge existing library before reimporting
+    db.prepare("DELETE FROM anime").run();
+
 
     const importAll = db.transaction(() => {
       for (const entry of entries) {

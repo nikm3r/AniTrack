@@ -99,7 +99,7 @@ export default function App() {
                   <div className="w-6 h-6 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
                 </div>
               ) : (
-                <Settings settings={settings} onSave={save} saving={saving} />
+                <Settings settings={settings} onSave={save} saving={saving} onSyncComplete={animeList.reload} />
               )}
             </div>
           )}
