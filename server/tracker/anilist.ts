@@ -38,6 +38,11 @@ async function gql<T>(
   return json.data as T;
 }
 
+// Rate limit helper — AniList allows 90 requests/minute
+async function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 function normalizeStatus(anilistStatus: string): string {
   const map: Record<string, string> = {
     CURRENT: "WATCHING",
@@ -196,9 +201,10 @@ export class AniListTracker implements ITracker {
     const viewerData = await gql<{ Viewer: { id: number } }>(viewerQ, {}, token);
     const userId = viewerData.Viewer.id;
 
-    // Fetch full list with all fields needed for display + season grouping
+    // ── Pass 1: fetch all list entries (lightweight — no heavy media fields) ──
+    // This avoids AniList's query complexity cap which truncates large lists
     const listQ = `
-      query ($userId: Int) {
+      query ($userId: Int, $page: Int) {
         MediaListCollection(userId: $userId, type: ANIME) {
           lists {
             entries {
@@ -214,9 +220,6 @@ export class AniListTracker implements ITracker {
                 episodes
                 season
                 seasonYear
-                genres
-                description(asHtml: false)
-                averageScore
               }
             }
           }
@@ -224,7 +227,7 @@ export class AniListTracker implements ITracker {
       }
     `;
 
-    type ListEntry = {
+    type LightEntry = {
       status: string;
       score: number;
       progress: number;
@@ -237,50 +240,86 @@ export class AniListTracker implements ITracker {
         episodes: number | null;
         season: string | null;
         seasonYear: number | null;
-        genres: string[];
-        description: string | null;
-        averageScore: number | null;
       };
     };
 
     const listData = await gql<{
-      MediaListCollection: { lists: { entries: ListEntry[] }[] };
+      MediaListCollection: { lists: { entries: LightEntry[] }[] };
     }>(listQ, { userId }, token);
 
-    const entries: TrackerUserListEntry[] = [];
-
+    // Flatten all lists into a single array
+    const rawEntries: LightEntry[] = [];
     for (const list of listData.MediaListCollection.lists) {
-      for (const e of list.entries) {
-        entries.push({
-          trackerId: String(e.media.id),
-          titleRomaji: e.media.title.romaji,
-          titleEnglish: e.media.title.english,
-          titleNative: e.media.title.native,
-          coverImage: e.media.coverImage?.large ?? null,
-          bannerImage: e.media.bannerImage ?? null,
-          status: normalizeStatus(e.status),
-          // AniList score is 0-10, store as-is
-          score: e.score ? e.score : null,
-          progress: e.progress,
-          totalEpisodes: e.media.episodes,
-          format: e.media.format,
-          // Extra fields for season grouping + detail panel
-          season: e.media.season,
-          seasonYear: e.media.seasonYear,
-          genres: e.media.genres ?? [],
-          description: e.media.description,
-          averageScore: e.media.averageScore,
-        } as TrackerUserListEntry & {
-          titleNative: string | null;
-          bannerImage: string | null;
-          season: string | null;
-          seasonYear: number | null;
-          genres: string[];
-          description: string | null;
-          averageScore: number | null;
-        });
-      }
+      rawEntries.push(...list.entries);
     }
+
+    console.log(`[anilist] Fetched ${rawEntries.length} list entries`);
+
+    // ── Pass 2: batch fetch genres/description/averageScore in chunks of 50 ──
+    // These are heavy fields that cause complexity issues if fetched with the list
+    const mediaIds = rawEntries.map(e => e.media.id);
+    const detailMap = new Map<number, { genres: string[]; description: string | null; averageScore: number | null }>();
+
+    const CHUNK_SIZE = 50;
+    for (let i = 0; i < mediaIds.length; i += CHUNK_SIZE) {
+      const chunk = mediaIds.slice(i, i + CHUNK_SIZE);
+      const detailQ = `
+        query ($ids: [Int]) {
+          Page(perPage: 50) {
+            media(id_in: $ids, type: ANIME) {
+              id
+              genres
+              description(asHtml: false)
+              averageScore
+            }
+          }
+        }
+      `;
+      type DetailMedia = { id: number; genres: string[]; description: string | null; averageScore: number | null };
+      try {
+        const detailData = await gql<{ Page: { media: DetailMedia[] } }>(detailQ, { ids: chunk }, token);
+        for (const m of detailData.Page.media) {
+          detailMap.set(m.id, { genres: m.genres ?? [], description: m.description, averageScore: m.averageScore });
+        }
+      } catch (e) {
+        console.error(`[anilist] Detail batch ${i}-${i + CHUNK_SIZE} failed:`, e);
+      }
+      // Respect rate limit — 90 req/min = ~670ms between requests
+      if (i + CHUNK_SIZE < mediaIds.length) await sleep(700);
+    }
+
+    console.log(`[anilist] Fetched details for ${detailMap.size}/${mediaIds.length} entries`);
+
+    // ── Merge ────────────────────────────────────────────────────────────────
+    const entries: TrackerUserListEntry[] = rawEntries.map(e => {
+      const detail = detailMap.get(e.media.id);
+      return {
+        trackerId: String(e.media.id),
+        titleRomaji: e.media.title.romaji,
+        titleEnglish: e.media.title.english,
+        titleNative: e.media.title.native,
+        coverImage: e.media.coverImage?.large ?? null,
+        bannerImage: e.media.bannerImage ?? null,
+        status: normalizeStatus(e.status),
+        score: e.score || null,
+        progress: e.progress,
+        totalEpisodes: e.media.episodes,
+        format: e.media.format,
+        season: e.media.season,
+        seasonYear: e.media.seasonYear,
+        genres: detail?.genres ?? [],
+        description: detail?.description ?? null,
+        averageScore: detail?.averageScore ?? null,
+      } as TrackerUserListEntry & {
+        titleNative: string | null;
+        bannerImage: string | null;
+        season: string | null;
+        seasonYear: number | null;
+        genres: string[];
+        description: string | null;
+        averageScore: number | null;
+      };
+    });
 
     return entries;
   }
