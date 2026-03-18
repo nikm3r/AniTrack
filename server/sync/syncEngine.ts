@@ -64,6 +64,8 @@ export class SyncEngine {
   private ignoring = 0; // clientIgnoringOnTheFly counter
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private speedSlowed = false;
+  private suppressNextPauseEvent = false; // set when WE command a pause — suppress echo
+  private suppressNextSeekEvent = false;  // set when WE command a seek — suppress echo
 
   // Config
   private username = "Guest";
@@ -192,18 +194,38 @@ export class SyncEngine {
       if (msg.event === "property-change") {
         const now = Date.now();
         if (msg.name === "time-pos" && msg.data !== null && msg.data !== undefined) {
+          if (this.suppressNextSeekEvent) {
+            // We commanded this seek — update position silently, don't echo
+            this.suppressNextSeekEvent = false;
+            this.player.position = msg.data;
+            this.player.updatedAt = now;
+            return;
+          }
+          const oldPos = this.player.position;
           this.player.position = msg.data;
           this.player.updatedAt = now;
-          // Send state to hub on position update (throttled by heartbeat)
+          // Detect user seek: position jumped more than SEEK_THRESHOLD from expected
+          const expected = oldPos + (now - (this.player.updatedAt || now)) / 1000;
+          const jumped = Math.abs(msg.data - expected) > 2.0;
+          if (jumped && this.hubConnected) {
+            console.log(`[sync] User seeked to ${msg.data.toFixed(1)}s`);
+            this._sendStateToHub(false);
+          }
         }
         if (msg.name === "pause" && msg.data !== null && msg.data !== undefined) {
           const wasPaused = this.player.paused;
           this.player.paused = msg.data;
           this.player.updatedAt = now;
 
-          // User changed pause state — send immediately
+          if (this.suppressNextPauseEvent) {
+            // We commanded this pause — don't echo back to hub
+            this.suppressNextPauseEvent = false;
+            return;
+          }
+
+          // User changed pause state manually — send immediately
           if (wasPaused !== msg.data) {
-            console.log(`[sync] MPV ${msg.data ? "paused" : "unpaused"} at ${this.player.position.toFixed(1)}s`);
+            console.log(`[sync] MPV ${msg.data ? "paused" : "unpaused"} by user at ${this.player.position.toFixed(1)}s`);
             this._sendStateToHub(false);
           }
         }
@@ -236,20 +258,24 @@ export class SyncEngine {
 
   private async _mpvSeek(seconds: number) {
     try {
+      this.suppressNextSeekEvent = true; // suppress echo
       await this._mpvCommand(["set_property", "time-pos", seconds]);
       this.player.position = seconds;
       this.player.updatedAt = Date.now();
     } catch (e) {
+      this.suppressNextSeekEvent = false;
       console.error("[sync] MPV seek failed:", e);
     }
   }
 
   private async _mpvSetPaused(paused: boolean) {
     try {
+      this.suppressNextPauseEvent = true; // suppress echo
       await this._mpvCommand(["set_property", "pause", paused]);
       this.player.paused = paused;
       this.player.updatedAt = Date.now();
     } catch (e) {
+      this.suppressNextPauseEvent = false;
       console.error("[sync] MPV setPaused failed:", e);
     }
   }
@@ -280,9 +306,19 @@ export class SyncEngine {
       this._emitStatus();
     });
 
+    socket.on("reconnect", () => {
+      console.log("[sync] Hub reconnected — rejoining room");
+      socket.emit("join-room", this.roomId, this.username);
+    });
+
     socket.on("disconnect", () => {
       this.hubConnected = false;
       this._emitStatus();
+      // We lost connection — pause our own player
+      if (this.mpvConnected) {
+        console.log("[sync] Hub disconnected — pausing player");
+        this._mpvSetPaused(true);
+      }
     });
 
     // ── Core: receive state from another user ────────────────────────────────
@@ -297,12 +333,6 @@ export class SyncEngine {
           // Other client wants us to ignore N of their reports
           // We don't need to do anything — just apply normally
         }
-      }
-
-      // If we're ignoring (we just sent a seek/pause), skip this update
-      if (this.ignoring > 0) {
-        this.ignoring--;
-        return;
       }
 
       // Update global state
@@ -321,9 +351,9 @@ export class SyncEngine {
     });
 
     socket.on("message", ({ text, system }: any) => {
-      if (system && text?.includes("left the room") && this.mpvConnected) {
-        console.log("[sync] User left, pausing");
-        this._mpvSetPaused(true);
+      if (system && text?.includes("left the room")) {
+        console.log(`[sync] ${text} — pausing player`);
+        if (this.mpvConnected) this._mpvSetPaused(true);
       }
     });
   }
@@ -340,16 +370,14 @@ export class SyncEngine {
     // Explicit seek from another user
     if (doSeek && setBy && setBy !== this.username) {
       console.log(`[sync] Remote seek by ${setBy} to ${position.toFixed(1)}s`);
-      this.ignoring = 1; // suppress our next echo
-      this._mpvSeek(position);
+      this._mpvSeek(position); // suppress flag set inside _mpvSeek
       return;
     }
 
     // We are way too far ahead — hard rewind
     if (diff > REWIND_THRESHOLD) {
       console.log(`[sync] Rewind: ${diff.toFixed(1)}s ahead`);
-      this.ignoring = 1;
-      this._mpvSeek(position);
+      this._mpvSeek(position); // suppress flag set inside _mpvSeek
       return;
     }
 
@@ -367,8 +395,7 @@ export class SyncEngine {
     // Pause/unpause changed
     if (pauseChanged) {
       console.log(`[sync] Remote ${paused ? "pause" : "play"} by ${setBy}`);
-      this.ignoring = 1;
-      this._mpvSetPaused(paused);
+      this._mpvSetPaused(paused); // suppress flag set inside _mpvSetPaused
     }
   }
 
@@ -388,8 +415,6 @@ export class SyncEngine {
     const globalDiff = Math.abs(globalPos - position);
     const doSeek = !isHeartbeat && playerDiff > SEEK_THRESHOLD && globalDiff > SEEK_THRESHOLD;
 
-    if (doSeek) this.ignoring = 1; // suppress echo of our own seek
-
     const payload: any = {
       roomId: this.roomId,
       position,
@@ -397,10 +422,6 @@ export class SyncEngine {
       doSeek,
       setBy: this.username,
     };
-
-    if (this.ignoring > 0) {
-      payload.ignoringOnTheFly = { client: this.ignoring };
-    }
 
     this.hubSocket.emit("state", payload);
     this.lastSentState = { position, paused };

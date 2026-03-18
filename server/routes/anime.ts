@@ -291,7 +291,7 @@ router.patch("/:id/progress", (req: Request, res: Response) => {
       const tracker = new AniListTracker();
       tracker
         .updateProgress(tokenRow.value, String(updated.anilist_id), updated.progress, updated.status)
-        .then(() => console.log(`[anime] AniList updated: anime ${updated.anilist_id} -> ep ${updated.progress}`))
+        .then(() => console.log(`[anime] AniList updated: "${updated.title_romaji}" -> ep ${updated.progress}`))
         .catch((e) => console.error("[anime] AniList progress update failed:", e));
     }
   }

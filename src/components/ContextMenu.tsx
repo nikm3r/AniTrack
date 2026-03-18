@@ -36,19 +36,12 @@ function epLabel(n: number): string {
 
 function guessEpisode(filename: string, totalEpisodes?: number | null): number | null {
   const base = filename.split("/").pop()?.split("\\").pop() || filename;
-  // Strip hex hashes like [E44435E5] before matching
   const clean = base.replace(/\.[^.]+$/, "").replace(/\[[0-9A-Fa-f]{6,8}\]/g, "").trim();
-  const patterns = [
-    /[Ee][Pp]?(\d{1,3})/,
-    / - (\d{2,3})[\s\[.]/,
-    /\s(\d{2,3})[\s\[.]/,
-    /_(\d{2,3})[_\[.]/,
-  ];
+  const patterns = [/[Ee][Pp]?(\d{1,3})/, / - (\d{2,3})[\s\[.]/, /\s(\d{2,3})[\s\[.]/, /_(\d{2,3})[_\[.]/];
   for (const re of patterns) {
     const m = clean.match(re);
     if (m) {
       const n = parseInt(m[1], 10);
-      // Skip if number exceeds total episodes — likely a year or other false match
       if (totalEpisodes && n > totalEpisodes) continue;
       return n;
     }
@@ -181,7 +174,7 @@ export default function ContextMenu({ x, y, anime, onClose, onUpdate, onSearchRe
       <div
         onMouseEnter={() => showItem(key)}
         onMouseLeave={hideItem}
-        className="absolute left-full top-0 ml-1.5 w-64 bg-zinc-900 border border-white/10 rounded-xl shadow-2xl shadow-black/60 py-1.5 z-[902] max-h-72 overflow-y-auto scrollbar-thin"
+        className="absolute left-full top-0 ml-1.5 w-96 bg-zinc-900 border border-white/10 rounded-xl shadow-2xl shadow-black/60 py-1.5 z-[902] max-h-96 overflow-y-auto scrollbar-thin"
       >
         {loadingFiles && <p className="text-xs text-zinc-600 px-4 py-2">Scanning folder…</p>}
         {!loadingFiles && sortedFiles.length === 0 && (
@@ -195,8 +188,8 @@ export default function ContextMenu({ x, y, anime, onClose, onUpdate, onSearchRe
           return (
             <button key={i} onClick={() => launchFile(f.fullPath, forSync)}
               className="w-full px-4 py-2 text-left text-xs text-zinc-300 hover:bg-emerald-500/10 hover:text-emerald-400 transition-colors flex items-center gap-2">
-              <Play className="w-3 h-3 flex-shrink-0" />
-              {ep != null ? epLabel(ep) : f.name.slice(0, 35)}
+              <Play className="w-3 h-3 flex-shrink-0 shrink-0" />
+              <span className="text-left break-words min-w-0">{f.name.replace(/\.[^.]+$/, '')}</span>
             </button>
           );
         })}
