@@ -14,15 +14,17 @@ interface PlaylistItem { mediaId: number; title: string; epNum: number; }
 interface RoomData { playlist: PlaylistItem[]; currentIndex: number; readyUsers: Record<string, boolean>; users: string[]; }
 interface ChatMessage { sender: string; text: string; system?: boolean; }
 interface Props { anime: Anime[]; settings: any; }
-
-// ─── Sync constants (mirrors Syncplay) ────────────────────────────────────────
-
-const SEEK_THRESHOLD = 1.0;          // seconds — both player and global must differ by this to count as a seek
-const REWIND_THRESHOLD = 4.0;        // seconds ahead — force seek back
-const SLOWDOWN_THRESHOLD = 1.5;      // seconds ahead — slow down playback rate
-const SLOWDOWN_RESET_THRESHOLD = 0.1;// seconds — resume normal speed
-const SLOWDOWN_RATE = 0.95;          // playback rate when slowing down
-const POLL_INTERVAL = 1000;          // ms between player polls
+interface SyncStatus {
+  active: boolean;
+  mpvConnected: boolean;
+  hubConnected: boolean;
+  playerPosition: number;
+  playerPaused: boolean;
+  globalPosition: number;
+  globalPaused: boolean;
+  drift: number;
+  synced: boolean;
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -105,35 +107,19 @@ export default function SyncWatch({ anime, settings }: Props) {
   const [isJoined, setIsJoined] = useState(false);
   const [nickname, setNickname] = useState("");
   const [roomId, setRoomId] = useState("");
-  const [connected, setConnected] = useState(false);
   const [roomData, setRoomData] = useState<RoomData>({ playlist: [], currentIndex: 0, readyUsers: {}, users: [] });
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [newMessage, setNewMessage] = useState("");
   const [localFileCache, setLocalFileCache] = useState<Record<number, any[]>>({});
-  const [playerConnected, setPlayerConnected] = useState(false);
-  const [localPosition, setLocalPosition] = useState<number | null>(null);
-  const [syncStatus, setSyncStatus] = useState<"synced" | "syncing" | "idle">("idle");
+  const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
 
+  // Hub socket — for room/playlist/chat events only
+  // All sync logic is now handled server-side by SyncEngine
   const socketRef = useRef<Socket | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const nicknameRef = useRef("");
   const roomIdRef = useRef("");
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  // ── Sync state (mirrors Syncplay client.py) ──────────────────────────────────
-  // Global state = what the server last told us (the room's authoritative state)
-  // Player state = what our local player is actually doing
-  const globalPosition = useRef(0);       // last known global position
-  const globalPaused = useRef(true);      // last known global paused state
-  const lastGlobalUpdate = useRef<number | null>(null); // wall clock of last global update
-  const playerPosition = useRef(0);       // last known local player position
-  const playerPaused = useRef(true);      // last known local player paused state
-  const lastPlayerUpdate = useRef<number | null>(null); // wall clock of last player update
-  const speedChanged = useRef(false);     // whether we've slowed down playback
-  const clientIgnoringOnTheFly = useRef(0); // how many of our own state reports to ignore
-  const lastFullSend = useRef(0); // timestamp of last periodic state send
-  const serverIgnoringOnTheFly = useRef(0); // how many server state reports to ignore
-  const positionBeforeLastSeek = useRef(0);
+  const statusPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const hubUrl = settings?.hub_url || "https://anitrack-hub.onrender.com";
   const myName = nickname || settings?.nickname || "Guest";
@@ -143,185 +129,22 @@ export default function SyncWatch({ anime, settings }: Props) {
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
-  // ── Get extrapolated global position (accounts for time elapsed since last update) ──
-  const getGlobalPosition = useCallback((): number => {
-    if (!lastGlobalUpdate.current) return 0;
-    let pos = globalPosition.current;
-    if (!globalPaused.current) {
-      pos += (Date.now() / 1000) - lastGlobalUpdate.current;
-    }
-    return pos;
-  }, []);
-
-  // ── Get extrapolated player position ────────────────────────────────────────
-  const getPlayerPosition = useCallback((): number => {
-    if (!lastPlayerUpdate.current) {
-      return lastGlobalUpdate.current ? getGlobalPosition() : 0;
-    }
-    let pos = playerPosition.current;
-    if (!playerPaused.current) {
-      pos += (Date.now() / 1000) - lastPlayerUpdate.current;
-    }
-    return pos;
-  }, [getGlobalPosition]);
-
-  // ── Apply a global state update to local player (mirrors _changePlayerStateAccordingToGlobalState) ──
-  const applyGlobalState = useCallback(async (position: number, paused: boolean, doSeek: boolean, setBy: string | null, messageAge: number) => {
-    // Compensate for network delay — advance position by messageAge
-    if (!paused) position += messageAge;
-
-    const wasGlobalPaused = globalPaused.current;
-    globalPosition.current = position;
-    globalPaused.current = paused;
-    lastGlobalUpdate.current = Date.now() / 1000;
-
-    const pauseChanged = paused !== wasGlobalPaused || paused !== playerPaused.current;
-    const playerPos = getPlayerPosition();
-    const diff = playerPos - position; // positive = we are ahead
-
-    // Only apply if a player is running
-    try {
-      const sessionRes = await api.get<{ active: boolean }>("/api/playback/status");
-      if (!sessionRes.active) return;
-    } catch { return; }
-
-    // First update — just jump to position
-    if (!lastPlayerUpdate.current) {
-      await api.post("/api/playback/sync-control", { action: "seekAndPlay", position });
-      if (paused) await api.post("/api/playback/sync-control", { action: "setPaused", paused: true });
-      return;
-    }
-
-    // Explicit seek from another user — jump to their position and suppress echo
-    if (doSeek && setBy && setBy !== myName) {
-      positionBeforeLastSeek.current = playerPos;
-      clientIgnoringOnTheFly.current += 1;
-      await api.post("/api/playback/sync-control", { action: "seek", position });
-      return;
-    }
-
-    // We are too far ahead — rewind and suppress echo
-    if (diff > REWIND_THRESHOLD && !doSeek) {
-      clientIgnoringOnTheFly.current += 1;
-      await api.post("/api/playback/sync-control", { action: "seek", position });
-      return;
-    }
-
-    // We are slightly ahead — slow down (0.95x) to drift back into sync
-    // We are back in sync — restore normal speed
-    if (!paused) {
-      if (diff > SLOWDOWN_THRESHOLD && !speedChanged.current) {
-        speedChanged.current = true;
-        setSyncStatus("syncing");
-        // Note: speed control requires player-specific API — skip for now, rely on rewind
-      } else if (diff < SLOWDOWN_RESET_THRESHOLD && speedChanged.current) {
-        speedChanged.current = false;
-        setSyncStatus("synced");
-      }
-    }
-
-    // Pause/unpause changed — apply and suppress our next echo
-    if (pauseChanged) {
-      clientIgnoringOnTheFly.current += 1; // suppress echo of this change
-      if (paused) {
-        await api.post("/api/playback/sync-control", { action: "setPaused", paused: true });
-      } else {
-        await api.post("/api/playback/sync-control", { action: "setPaused", paused: false });
-      }
-    }
-  }, [myName, getPlayerPosition]);
-
-  // ── Determine if local player state change counts as a seek ──────────────────
-  // Mirrors Syncplay: seeked = playerDiff > threshold AND globalDiff > threshold
-  const determineStateChange = useCallback((pos: number, paused: boolean): { pauseChange: boolean; seeked: boolean } => {
-    const pauseChange = playerPaused.current !== paused && globalPaused.current !== paused;
-    const playerDiff = Math.abs(getPlayerPosition() - pos);
-    const globalDiff = Math.abs(getGlobalPosition() - pos);
-    const seeked = playerDiff > SEEK_THRESHOLD && globalDiff > SEEK_THRESHOLD;
-    return { pauseChange, seeked };
-  }, [getPlayerPosition, getGlobalPosition]);
-
-  // ── Send our state to the hub ────────────────────────────────────────────────
-  const sendState = useCallback((position: number, paused: boolean, seeked: boolean, stateChange: boolean) => {
-    if (!socketRef.current?.connected) return;
-    if (!stateChange && !seeked) return; // Only send on actual changes or periodically
-
-    const doSeek = seeked;
-    if (doSeek) clientIgnoringOnTheFly.current += 1;
-
-    const payload: any = {
-      roomId: roomIdRef.current,
-      position,
-      paused,
-      doSeek,
-      setBy: nicknameRef.current,
-    };
-
-    if (serverIgnoringOnTheFly.current > 0 || clientIgnoringOnTheFly.current > 0) {
-      payload.ignoringOnTheFly = {};
-      if (serverIgnoringOnTheFly.current > 0) {
-        payload.ignoringOnTheFly.server = serverIgnoringOnTheFly.current;
-        serverIgnoringOnTheFly.current = 0;
-      }
-      if (clientIgnoringOnTheFly.current > 0) {
-        payload.ignoringOnTheFly.client = clientIgnoringOnTheFly.current;
-      }
-    }
-
-    socketRef.current.emit("state", payload);
-  }, []);
-
-  // ── Player poll (runs every 1s) ───────────────────────────────────────────────
-  const startPolling = useCallback(() => {
-    if (pollRef.current) clearInterval(pollRef.current);
-
-    pollRef.current = setInterval(async () => {
-      if (!socketRef.current?.connected) return;
-
+  // Poll sync status from server every 500ms for UI display only
+  const startStatusPoll = useCallback(() => {
+    if (statusPollRef.current) clearInterval(statusPollRef.current);
+    statusPollRef.current = setInterval(async () => {
       try {
-        // Check if a session is active first
-        const sessionRes = await api.get<{ active: boolean }>("/api/playback/status");
-        if (!sessionRes.active) {
-          setPlayerConnected(false);
-          return;
-        }
-
-        // Get current player position and paused state
-        const res = await api.post<{ ok: boolean; status: any }>("/api/playback/sync-control", { action: "getStatus" });
-        if (!res.ok || !res.status) { setPlayerConnected(false); return; }
-
-        const { position, paused } = res.status;
-        setPlayerConnected(true);
-        setLocalPosition(position);
-
-        const { pauseChange, seeked } = determineStateChange(position, paused);
-
-        // Update player state refs
-        playerPosition.current = position;
-        playerPaused.current = paused;
-        lastPlayerUpdate.current = Date.now() / 1000;
-
-        // Send state to hub if something changed or periodically
-        const stateChange = pauseChange || seeked;
-        sendState(position, paused, seeked, stateChange);
-
-        // Update sync status display
-        if (lastGlobalUpdate.current) {
-          const diff = Math.abs(position - getGlobalPosition());
-          setSyncStatus(diff < 2 ? "synced" : "syncing");
-        }
-      } catch {
-        setPlayerConnected(false);
-      }
-    }, POLL_INTERVAL);
-  }, [determineStateChange, sendState, getGlobalPosition]);
-
-  const stopPolling = useCallback(() => {
-    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+        const status = await api.get<SyncStatus>("/api/sync/status");
+        setSyncStatus(status);
+      } catch {}
+    }, 500);
   }, []);
 
-  // ── Socket connection ────────────────────────────────────────────────────────
+  const stopStatusPoll = useCallback(() => {
+    if (statusPollRef.current) { clearInterval(statusPollRef.current); statusPollRef.current = null; }
+  }, []);
 
+  // Socket connection — room/playlist/chat events only
   useEffect(() => {
     if (!isJoined) return;
 
@@ -333,67 +156,29 @@ export default function SyncWatch({ anime, settings }: Props) {
     });
 
     socketRef.current = socket;
+    (window as any).__syncSocket = socket;
 
     socket.on("connect", () => {
-      setConnected(true);
       socket.emit("join-room", roomIdRef.current, nicknameRef.current);
-      (window as any).__syncSocket = socket;
       setMessages(prev => [...prev, { sender: "system", text: `Connected to room "${roomIdRef.current}"`, system: true }]);
-      startPolling();
     });
 
     socket.on("disconnect", () => {
-      setConnected(false);
-      stopPolling();
       setMessages(prev => [...prev, { sender: "system", text: "Disconnected from hub", system: true }]);
     });
-
-    socket.on("connect_error", () => { setConnected(false); stopPolling(); });
 
     socket.on("playlist-updated", (data: RoomData) => setRoomData(data));
 
     socket.on("message", (msg: ChatMessage) => {
       setMessages(prev => [...prev, msg]);
-      // Pause on user leave (mirrors Syncplay pauseOnLeave behaviour)
-      if (msg.system && msg.text?.includes("left the room")) {
-        api.post("/api/playback/sync-control", { action: "setPaused", paused: true }).catch(() => {});
-        api.get<{ active: boolean }>("/api/playback/status").then(res => {
-          if (res.active) {
-            setMessages(prev => [...prev, { sender: "system", text: "Paused — someone left the room", system: true }]);
-          }
-        }).catch(() => {});
-      }
     });
 
-    // ── Core: receive state from another user (mirrors handleState in protocols.py) ──
-    socket.on("state", ({ position, paused, doSeek, setBy, ignoringOnTheFly }: any) => {
-      // Handle ignoringOnTheFly counters
-      if (ignoringOnTheFly) {
-        if (ignoringOnTheFly.server !== undefined) {
-          serverIgnoringOnTheFly.current = ignoringOnTheFly.server;
-          clientIgnoringOnTheFly.current = 0;
-        }
-        if (ignoringOnTheFly.client !== undefined) {
-          if (ignoringOnTheFly.client === clientIgnoringOnTheFly.current) {
-            clientIgnoringOnTheFly.current = 0;
-          }
-        }
-      }
-
-      // Only apply if we are not ignoring
-      if (clientIgnoringOnTheFly.current === 0) {
-        const messageAge = 0.05; // rough network delay estimate ~50ms
-        applyGlobalState(position, paused, doSeek, setBy, messageAge);
-      }
-    });
-
-    // Hub tells everyone to launch a specific episode
     socket.on("auto-launch-request", async (target: { mediaId: number; epNum: number }) => {
       const animeData = anime.find(a => a.id === target.mediaId || a.anilist_id === target.mediaId);
       if (!animeData) return;
       try {
         const res = await api.get<{ files: any[] }>(`/api/files/scan/${animeData.id}`);
-        const file = res.files.find((f: any) => guessEpisode(f.name) === target.epNum);
+        const file = res.files.find((f: any) => guessEpisode(f.name, animeData.total_episodes) === target.epNum);
         if (file) {
           await api.post("/api/playback/launch", {
             animeId: animeData.id,
@@ -401,16 +186,9 @@ export default function SyncWatch({ anime, settings }: Props) {
             forSync: true,
             trackingDelaySecs: parseInt(settings?.tracking_delay || "180"),
           });
-          // Reset sync state for new episode
-          globalPosition.current = 0;
-          globalPaused.current = true;
-          lastGlobalUpdate.current = null;
-          playerPosition.current = 0;
-          playerPaused.current = true;
-          lastPlayerUpdate.current = null;
           setMessages(prev => [...prev, {
             sender: "system",
-            text: `Launching ${animeData.title?.romaji || "episode"} Ep ${target.epNum}`,
+            text: `Launching ${animeData.title_romaji} Ep ${target.epNum}`,
             system: true,
           }]);
         }
@@ -418,16 +196,13 @@ export default function SyncWatch({ anime, settings }: Props) {
     });
 
     return () => {
-      stopPolling();
       socket.disconnect();
       (window as any).__syncSocket = null;
       socketRef.current = null;
-      setConnected(false);
     };
-  }, [isJoined, hubUrl, startPolling, stopPolling, applyGlobalState]);
+  }, [isJoined, hubUrl]);
 
-  // ── Load local file cache ────────────────────────────────────────────────────
-
+  // File cache
   useEffect(() => {
     if (!isJoined || roomData.playlist.length === 0) return;
     const ids = [...new Set(roomData.playlist.map(p => p.mediaId))];
@@ -442,32 +217,28 @@ export default function SyncWatch({ anime, settings }: Props) {
     });
   }, [roomData.playlist, isJoined]);
 
-  // ── Handlers ─────────────────────────────────────────────────────────────────
+  // ── Handlers ──────────────────────────────────────────────────────────────────
 
-  const handleJoin = (nick: string, room: string) => {
+  const handleJoin = async (nick: string, room: string) => {
     nicknameRef.current = nick;
     roomIdRef.current = room;
     setNickname(nick);
     setRoomId(room);
+    // Tell server-side SyncEngine to join
+    await api.post("/api/sync/join", { roomId: room, username: nick });
     setIsJoined(true);
+    startStatusPoll();
   };
 
-  const handleLeave = () => {
-    stopPolling();
+  const handleLeave = async () => {
+    stopStatusPoll();
+    await api.post("/api/sync/leave", {});
     socketRef.current?.emit("leave-room", { roomId: roomIdRef.current, username: nicknameRef.current });
     socketRef.current?.disconnect();
     setIsJoined(false);
     setRoomData({ playlist: [], currentIndex: 0, readyUsers: {}, users: [] });
     setMessages([]);
-    setLocalPosition(null);
-    setPlayerConnected(false);
-    setSyncStatus("idle");
-    globalPosition.current = 0;
-    globalPaused.current = true;
-    lastGlobalUpdate.current = null;
-    playerPosition.current = 0;
-    playerPaused.current = true;
-    lastPlayerUpdate.current = null;
+    setSyncStatus(null);
   };
 
   const toggleReady = () => {
@@ -496,8 +267,12 @@ export default function SyncWatch({ anime, settings }: Props) {
 
   const hasFile = (mediaId: number, epNum: number): boolean => {
     const files = localFileCache[mediaId] || [];
-    return files.some((f: any) => guessEpisode(f.name) === epNum);
+    const animeData = anime.find(a => a.id === mediaId || a.anilist_id === mediaId);
+    return files.some((f: any) => guessEpisode(f.name, animeData?.total_episodes) === epNum);
   };
+
+  const connected = syncStatus?.hubConnected ?? false;
+  const playerConnected = syncStatus?.mpvConnected ?? false;
 
   if (!isJoined) {
     return <JoinScreen onJoin={handleJoin} defaultNickname={settings?.nickname || ""} />;
@@ -517,18 +292,17 @@ export default function SyncWatch({ anime, settings }: Props) {
         </div>
 
         {/* Sync indicator */}
-        {playerConnected && localPosition !== null && (
+        {playerConnected && syncStatus && (
           <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold border ${
-            syncStatus === "synced"
+            syncStatus.synced
               ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400"
-              : syncStatus === "syncing"
-              ? "bg-amber-500/10 border-amber-500/20 text-amber-400"
-              : "bg-zinc-800 border-white/5 text-zinc-500"
+              : "bg-amber-500/10 border-amber-500/20 text-amber-400"
           }`}>
             <Radio className="w-3 h-3" />
-            {syncStatus === "synced" && `In sync · ${formatTime(localPosition)}`}
-            {syncStatus === "syncing" && `Catching up… · ${formatTime(localPosition)}`}
-            {syncStatus === "idle" && formatTime(localPosition)}
+            {syncStatus.synced
+              ? `In sync · ${formatTime(syncStatus.playerPosition)}`
+              : `${syncStatus.drift.toFixed(1)}s off · ${formatTime(syncStatus.playerPosition)}`
+            }
           </div>
         )}
 

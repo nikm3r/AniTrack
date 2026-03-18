@@ -5,6 +5,7 @@ import cors from "cors";
 import path from "path";
 import { getDb } from "./db.js";
 import animeRouter from "./routes/anime.js";
+import syncRouter from "./routes/sync.js";
 import episodesRouter from "./routes/episodes.js";
 import settingsRouter from "./routes/settings.js";
 import trackerRouter from "./routes/tracker.js";
@@ -71,6 +72,7 @@ app.get("/api/proxy-image", async (req, res) => {
 });
 
 app.use("/api/anime", animeRouter);
+app.use("/api/sync", syncRouter);
 app.use("/api/anime/:animeId/episodes", episodesRouter);
 app.use("/api/settings", settingsRouter);
 app.use("/api/tracker", trackerRouter);
