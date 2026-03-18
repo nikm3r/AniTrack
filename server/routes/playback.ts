@@ -7,6 +7,7 @@ import { getDb } from "../db.js";
 import {
   setActivePlayer, clearActivePlayer, getController, installVlcLua, MpvController,
 } from "../sync/playerController.js";
+import { io } from "../index.js";
 
 const router = Router();
 
@@ -173,7 +174,7 @@ router.post("/launch", async (req: Request, res: Response) => {
   }
 
   const episode = guessEpisode(filePath, anime.total_episodes);
-  const trackAfterMs = Math.max(30, trackingDelaySecs) * 1000;
+  const trackAfterMs = Math.max(0, trackingDelaySecs) * 1000;
 
   let proc: ChildProcess | null = null;
   try {
@@ -218,19 +219,25 @@ router.post("/launch", async (req: Request, res: Response) => {
     try {
       const currentEp = session.episode;
       if (currentEp != null) {
+        // Always update to the current episode — even if it matches existing progress
+        // so AniList always gets notified
         const newProgress = Math.max(anime.progress, currentEp);
-        await fetch(`http://localhost:3000/api/anime/${animeId}/progress`, {
+        const port = process.env.SERVER_PORT || 3000;
+        await fetch(`http://localhost:${port}/api/anime/${animeId}/progress`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ progress: newProgress }),
+          body: JSON.stringify({ progress: newProgress, forceAnilistUpdate: true }),
         });
         try {
-          await fetch(`http://localhost:3000/api/anime/${animeId}/episodes/${currentEp}/watch`, {
+          await fetch(`http://localhost:${port}/api/anime/${animeId}/episodes/${currentEp}/watch`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ watched: true }),
           });
         } catch {}
+        // Notify frontend to update without full reload
+        io.emit("progress:updated", { animeId, episode: currentEp, progress: newProgress });
+        console.log(`[playback] Tracked anime ${animeId} ep ${currentEp} -> progress ${newProgress}`);
       }
       session.tracked = true;
       session.secondsRemaining = 0;
@@ -240,7 +247,8 @@ router.post("/launch", async (req: Request, res: Response) => {
   }, trackAfterMs);
 
   proc.on("close", () => {
-    setTimeout(() => { if (session?.animeId === animeId) clearSession(); }, 10_000);
+    const clearDelay = Math.max(trackAfterMs + 3000, 10_000);
+    setTimeout(() => { if (session?.animeId === animeId) clearSession(); }, clearDelay);
   });
 
   res.json({ launched: true, player: player.exe, playerType: player.type, animeId, episode, filePath, trackAfterSecs: trackingDelaySecs });

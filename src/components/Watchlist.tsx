@@ -115,7 +115,8 @@ export default function Watchlist({ animeList, settings, onSearchRequest }: Prop
   useEffect(() => {
     const poll = async () => {
       try {
-        const res = await fetch("http://localhost:3000/api/playback/status");
+        const port = (window as any).__SERVER_PORT || 3000;
+        const res = await fetch(`http://localhost:${port}/api/playback/status`);
         if (res.ok) {
           const data = await res.json();
           setNowPlaying({ animeId: data.animeId ?? null, episode: data.episode ?? null, secondsRemaining: data.secondsRemaining ?? 0, filePath: data.filePath ?? null });
@@ -357,6 +358,7 @@ export default function Watchlist({ animeList, settings, onSearchRequest }: Prop
           anime={contextMenu.anime}
           onClose={() => setContextMenu(c => ({ ...c, visible: false }))}
           onUpdate={handleAnimeUpdate}
+          settings={settings}
         />
       )}
     </div>

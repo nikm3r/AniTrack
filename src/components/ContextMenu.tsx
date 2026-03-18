@@ -12,11 +12,13 @@ interface Props {
   anime: Anime;
   onClose: () => void;
   onUpdate: (updated: Partial<Anime> & { id: number }) => void;
+  settings?: any;
 }
 
 interface ScannedFile { name: string; fullPath: string; size: number; }
 
 interface Filters {
+  altTitle: string;
   group: string; quality: string; keywords: string; overridePath: string;
 }
 
@@ -41,26 +43,30 @@ function guessEpisode(filename: string): number | null {
   return null;
 }
 
-function loadFilters(animeId: number): Filters {
+function filterKey(titleRomaji: string): string {
+  // Use romaji title as key — stable across resyncs, account changes, etc.
+  return `filters_t_${titleRomaji.toLowerCase().replace(/[^a-z0-9]/g, "_")}`;
+}
+
+function loadFilters(animeId: number, titleRomaji: string): Filters {
   try {
-    const saved = localStorage.getItem(`filters_${animeId}`);
+    const key = filterKey(titleRomaji);
+    const saved = localStorage.getItem(key);
     if (saved) return JSON.parse(saved);
   } catch { }
-  return { group: "", quality: "1080p", keywords: "", overridePath: "" };
+  return { altTitle: "", group: "", quality: "1080p", keywords: "", overridePath: "" };
 }
 
-function saveFilters(animeId: number, filters: Filters) {
-  localStorage.setItem(`filters_${animeId}`, JSON.stringify(filters));
+function saveFilters(animeId: number, filters: Filters, titleRomaji: string) {
+  localStorage.setItem(filterKey(titleRomaji), JSON.stringify(filters));
 }
 
-export default function ContextMenu({ x, y, anime, onClose, onUpdate, onSearchRequest }: Props) {
+export default function ContextMenu({ x, y, anime, onClose, onUpdate, onSearchRequest, settings }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [hoveredItem, setHoveredItem] = useState<string | null>(null);
-  const [altTitleInput, setAltTitleInput] = useState((anime as any).alt_title ?? "");
-  const [showAltTitle, setShowAltTitle] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
-  const [filters, setFilters] = useState<Filters>(() => loadFilters(anime.id));
+  const [filters, setFilters] = useState<Filters>(() => ({ ...loadFilters(anime.id, anime.title_romaji), altTitle: (anime as any).alt_title ?? "" }));
   const [files, setFiles] = useState<ScannedFile[] | null>(null);
   const [loadingFiles, setLoadingFiles] = useState(false);
   const [pos, setPos] = useState({ x, y });
@@ -117,7 +123,7 @@ export default function ContextMenu({ x, y, anime, onClose, onUpdate, onSearchRe
       } else {
         try {
           await api.post("/api/playback/launch", {
-            animeId: anime.id, filePath, trackingDelaySecs: 180,
+            animeId: anime.id, filePath, trackingDelaySecs: parseInt(settings?.tracking_delay || "180", 10),
           });
         } catch (e) { console.error("Launch failed", e); }
       }
@@ -132,28 +138,23 @@ export default function ContextMenu({ x, y, anime, onClose, onUpdate, onSearchRe
     onClose();
   };
 
-  const handleSetAltTitle = async () => {
-    try {
-      await api.patch(`/api/anime/${anime.id}`, { alt_title: altTitleInput });
-      onUpdate({ id: anime.id, alt_title: altTitleInput } as any);
-    } catch (e) { console.error(e); }
-    onClose();
-  };
-
   const handleSaveFilters = async () => {
-    saveFilters(anime.id, filters);
-    if (filters.overridePath !== (anime as any).download_path) {
+    saveFilters(anime.id, filters, anime.title_romaji);
+    const updates: any = {};
+    if (filters.overridePath !== (anime as any).download_path) updates.download_path = filters.overridePath || null;
+    if (filters.altTitle !== ((anime as any).alt_title ?? "")) updates.alt_title = filters.altTitle || null;
+    if (Object.keys(updates).length > 0) {
       try {
-        await api.patch(`/api/anime/${anime.id}`, { download_path: filters.overridePath || null });
-        onUpdate({ id: anime.id, download_path: filters.overridePath || null });
+        await api.patch(`/api/anime/${anime.id}`, updates);
+        onUpdate({ id: anime.id, ...updates });
       } catch (e) { console.error(e); }
     }
     onClose();
   };
 
   const handleTorrentSearch = () => {
-    const f = loadFilters(anime.id);
-    const title = (anime as any).alt_title || anime.title_romaji;
+    const f = loadFilters(anime.id, anime.title_romaji);
+    const title = filters.altTitle || (anime as any).alt_title || anime.title_romaji;
     const q = [title, f.group, f.quality, f.keywords].filter(Boolean).join(" ");
     onSearchRequest(q);
     onClose();
@@ -211,32 +212,6 @@ export default function ContextMenu({ x, y, anime, onClose, onUpdate, onSearchRe
     </div>
   );
 
-  if (showAltTitle) {
-    return (
-      <>
-        <div className="fixed inset-0 z-[900]" onClick={onClose} />
-        <div ref={ref} style={{ left: pos.x, top: pos.y }} onClick={e => e.stopPropagation()}
-          className="fixed z-[901] w-72 bg-zinc-900 border border-white/10 rounded-xl shadow-2xl p-4">
-          <div className="flex items-center justify-between mb-3">
-            <p className="text-xs font-bold text-zinc-300">Set Alternative Title</p>
-            <button onClick={onClose} className="text-zinc-600 hover:text-zinc-400"><X className="w-3.5 h-3.5" /></button>
-          </div>
-          <p className="text-[10px] text-zinc-600 mb-2">Used for torrent searches instead of the AniList title</p>
-          <input autoFocus type="text" value={altTitleInput}
-            onChange={e => setAltTitleInput(e.target.value)}
-            placeholder={anime.title_romaji}
-            className="w-full bg-black/50 border border-white/15 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-500/50"
-            onKeyDown={e => { if (e.key === "Enter") handleSetAltTitle(); if (e.key === "Escape") onClose(); }}
-          />
-          <div className="flex gap-2 mt-3">
-            <button onClick={onClose} className="flex-1 py-2 bg-white/5 text-zinc-400 text-xs rounded-lg hover:bg-white/8 transition-colors">Cancel</button>
-            <button onClick={handleSetAltTitle} className="flex-1 py-2 bg-emerald-500/15 text-emerald-400 text-xs font-medium rounded-lg hover:bg-emerald-500/25 transition-colors">Save</button>
-          </div>
-        </div>
-      </>
-    );
-  }
-
   if (showFilters) {
     return (
       <>
@@ -248,12 +223,19 @@ export default function ContextMenu({ x, y, anime, onClose, onUpdate, onSearchRe
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
               <SlidersHorizontal className="w-4 h-4 text-emerald-500" />
-              <p className="text-sm font-bold text-zinc-200">Edit Filters</p>
+              <p className="text-sm font-bold text-zinc-200">Edit Settings</p>
             </div>
             <button onClick={onClose} className="text-zinc-600 hover:text-zinc-400"><X className="w-4 h-4" /></button>
           </div>
           <p className="text-xs text-zinc-600 mb-4 truncate">{anime.title_english || anime.title_romaji}</p>
           <div className="space-y-3">
+            <div>
+              <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-1.5 block">Alternative Title (for torrent search)</label>
+              <input type="text" value={filters.altTitle}
+                onChange={e => setFilters(f => ({ ...f, altTitle: e.target.value }))}
+                placeholder={anime.title_romaji}
+                className="w-full bg-black/50 border border-white/10 rounded-xl px-3 py-2.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-500/50" />
+            </div>
             <div>
               <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-1.5 block">Folder Override (full path)</label>
               <input type="text" value={filters.overridePath}
@@ -354,21 +336,14 @@ export default function ContextMenu({ x, y, anime, onClose, onUpdate, onSearchRe
           {hoveredItem === "status" && <StatusFlyout />}
         </div>
 
-        {/* Set Alternative Title */}
-        <button onClick={() => setShowAltTitle(true)}
-          className="flex items-center gap-2.5 w-full px-4 py-2.5 text-left text-sm text-zinc-300 hover:bg-white/8 hover:text-zinc-100 transition-colors">
-          <FileEdit className="w-3.5 h-3.5 text-zinc-500" />
-          <span className="flex-1">Set Alternative Title</span>
-          {(anime as any).alt_title && (
-            <span className="text-[10px] text-emerald-500 bg-emerald-500/10 px-1.5 py-0.5 rounded">set</span>
-          )}
-        </button>
-
-        {/* Edit Filters */}
+        {/* Edit Settings */}
         <button onClick={() => setShowFilters(true)}
           className="flex items-center gap-2.5 w-full px-4 py-2.5 text-left text-sm text-zinc-300 hover:bg-white/8 hover:text-zinc-100 transition-colors">
           <SlidersHorizontal className="w-3.5 h-3.5 text-zinc-500" />
-          Edit Filters
+          <span className="flex-1">Edit Settings</span>
+          {((anime as any).alt_title || filters.group || filters.overridePath) && (
+            <span className="text-[10px] text-emerald-500 bg-emerald-500/10 px-1.5 py-0.5 rounded">set</span>
+          )}
         </button>
       </div>
     </>

@@ -167,6 +167,9 @@ router.post("/import-list", async (req: Request, res: Response) => {
     let updated = 0;
     let newCount = 0;
     // Purge existing library before reimporting
+    // But first save user-set fields that should survive resync
+    const userFields = db.prepare("SELECT anilist_id, alt_title, download_path, notes FROM anime WHERE anilist_id IS NOT NULL").all() as { anilist_id: number; alt_title: string | null; download_path: string | null; notes: string | null }[];
+    const userFieldMap = new Map(userFields.map(r => [r.anilist_id, r]));
     db.prepare("DELETE FROM anime").run();
 
 
@@ -196,6 +199,17 @@ router.post("/import-list", async (req: Request, res: Response) => {
           (entry as any).description ?? null,
           (entry as any).averageScore ?? null
         );
+
+        // Restore user-set fields that survived the purge
+        const saved = userFieldMap.get(Number(entry.trackerId));
+        if (saved && (saved.alt_title || saved.download_path || saved.notes)) {
+          db.prepare("UPDATE anime SET alt_title = ?, download_path = ?, notes = ? WHERE anilist_id = ?").run(
+            saved.alt_title ?? null,
+            saved.download_path ?? null,
+            saved.notes ?? null,
+            Number(entry.trackerId)
+          );
+        }
 
         synced++;
         if (existing) { updated++; } else { newCount++; }

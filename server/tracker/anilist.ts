@@ -283,4 +283,33 @@ export class AniListTracker implements ITracker {
     console.log(`[anilist] Fetched ${entries.length} list entries for ${userName}`);
     return entries;
   }
+  async updateProgress(token: string, mediaId: string, progress: number, status: string): Promise<void> {
+    const statusMap: Record<string, string> = {
+      WATCHING:  "CURRENT",
+      COMPLETED: "COMPLETED",
+      PLANNING:  "PLANNING",
+      DROPPED:   "DROPPED",
+      PAUSED:    "PAUSED",
+    };
+    const anilistStatus = statusMap[status] ?? "CURRENT";
+
+    const mutation = `
+      mutation ($mediaId: Int, $progress: Int, $status: MediaListStatus) {
+        SaveMediaListEntry(mediaId: $mediaId, progress: $progress, status: $status) {
+          id
+          progress
+          status
+        }
+      }
+    `;
+
+    await gql(mutation, {
+      mediaId: parseInt(mediaId, 10),
+      progress,
+      status: anilistStatus,
+    }, token);
+
+    console.log(`[anilist] Updated progress for media ${mediaId}: ep ${progress} (${anilistStatus})`);
+  }
+
 }

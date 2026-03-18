@@ -47,4 +47,5 @@ export interface ITracker {
   search(query: string): Promise<TrackerSearchResult[]>;
   getAnime(id: string): Promise<TrackerAnimeDetail>;
   getUserList(token: string): Promise<TrackerUserListEntry[]>;
+  updateProgress(token: string, mediaId: string, progress: number, status: string): Promise<void>;
 }

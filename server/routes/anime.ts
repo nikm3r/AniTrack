@@ -1,5 +1,6 @@
 import { Router, Request, Response } from "express";
 import { getDb, touchUpdatedAt, type Anime } from "../db.js";
+import { AniListTracker } from "../tracker/anilist.js";
 
 const router = Router();
 
@@ -239,7 +240,7 @@ router.delete("/:id", (req: Request, res: Response) => {
 router.patch("/:id/progress", (req: Request, res: Response) => {
   const db = getDb();
   const id = parseInt(req.params.id, 10);
-  const { progress, status } = req.body;
+  const { progress, status, forceAnilistUpdate = false } = req.body;
 
   if (typeof progress !== "number" || progress < 0) {
     res.status(400).json({ error: "progress must be a non-negative number" });
@@ -276,6 +277,25 @@ router.patch("/:id/progress", (req: Request, res: Response) => {
   const updated = db
     .prepare("SELECT * FROM anime WHERE id = ?")
     .get(id) as Anime;
+
+  // Push progress update to AniList in the background
+  if (updated.anilist_id) {
+    const tokenRow = db
+      .prepare("SELECT value FROM settings WHERE key = 'anilist_token'")
+      .get() as { value: string } | undefined;
+    const autoUpdate = db
+      .prepare("SELECT value FROM settings WHERE key = 'auto_update_tracker'")
+      .get() as { value: string } | undefined;
+
+    if (tokenRow?.value && autoUpdate?.value !== "false") {
+      const tracker = new AniListTracker();
+      tracker
+        .updateProgress(tokenRow.value, String(updated.anilist_id), updated.progress, updated.status)
+        .then(() => console.log(`[anime] AniList updated: anime ${updated.anilist_id} -> ep ${updated.progress}`))
+        .catch((e) => console.error("[anime] AniList progress update failed:", e));
+    }
+  }
+
   res.json({
     ...updated,
     genres: updated.genres ? JSON.parse(updated.genres) : [],
