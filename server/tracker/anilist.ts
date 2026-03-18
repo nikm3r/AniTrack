@@ -204,7 +204,7 @@ export class AniListTracker implements ITracker {
     // ── Pass 1: fetch all list entries (lightweight — no heavy media fields) ──
     // This avoids AniList's query complexity cap which truncates large lists
     const listQ = `
-      query ($userId: Int, $page: Int) {
+      query ($userId: Int) {
         MediaListCollection(userId: $userId, type: ANIME) {
           lists {
             entries {
