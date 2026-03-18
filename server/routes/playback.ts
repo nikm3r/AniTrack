@@ -2,9 +2,15 @@ import { Router, Request, Response } from "express";
 import { spawn, ChildProcess } from "child_process";
 import path from "path";
 import fs from "fs";
+import os from "os";
 import { getDb } from "../db.js";
+import {
+  setActivePlayer, clearActivePlayer, getController, installVlcLua, MpvController,
+} from "../sync/playerController.js";
 
 const router = Router();
+
+// ─── Playback session ─────────────────────────────────────────────────────────
 
 interface PlaybackSession {
   animeId: number;
@@ -26,13 +32,14 @@ function clearSession() {
   if (session?.trackTimer) clearTimeout(session.trackTimer);
   if (session?.tickInterval) clearInterval(session.tickInterval);
   session = null;
+  clearActivePlayer();
 }
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function guessEpisode(filename: string, totalEpisodes?: number | null): number | null {
   const base = path.basename(filename);
-  // Strip hex hashes like [E44435E5] and [1CDE4167] before matching
   const clean = base.replace(/\.[^.]+$/, "").replace(/\[[0-9A-Fa-f]{6,8}\]/g, "").trim();
-
   const patterns = [
     /[Ee][Pp]?(\d{1,3})/,
     / - (\d{2,3})[\s\[.]/,
@@ -50,65 +57,80 @@ function guessEpisode(filename: string, totalEpisodes?: number | null): number |
   return null;
 }
 
-function findPlayer(): { exe: string; args: (filePath: string) => string[] } | null {
+function getSettings() {
   const db = getDb();
+  const rows = db.prepare("SELECT key, value FROM settings").all() as { key: string; value: string }[];
+  return Object.fromEntries(rows.map((r) => [r.key, r.value]));
+}
 
-  // Check for custom player path in settings first
+function findPlayer(): { exe: string; args: (filePath: string, forSync: boolean) => string[]; type: "mpv" | "vlc" } | null {
+  const db = getDb();
   const playerPathRow = db.prepare("SELECT value FROM settings WHERE key = 'player_path'").get() as { value: string } | undefined;
   const playerModeRow = db.prepare("SELECT value FROM settings WHERE key = 'player_mode'").get() as { value: string } | undefined;
 
   const customPath = playerPathRow?.value?.trim();
   const playerMode = playerModeRow?.value?.trim() || "mpv";
 
-  // If user set a custom path, use it directly
+  const ipcSocket = MpvController.getSocketPath();
+
+  const mpvArgs = (f: string, forSync: boolean) => {
+    const args = ["--no-terminal", "--force-window=yes", `--input-ipc-server=${ipcSocket}`];
+    if (forSync) args.push("--pause");
+    args.push(f);
+    return args;
+  };
+
+  // VLC gets a random port for the syncplay lua intf
+  const vlcLuaPort = 10000 + Math.floor(Math.random() * 45000);
+  const vlcArgs = (f: string, forSync: boolean) => {
+    const args = [
+      "--extraintf=luaintf",
+      "--lua-intf=syncplay",
+      `--lua-config=syncplay={port="${vlcLuaPort}"}`,
+      "--no-quiet",
+      "--no-input-fast-seek",
+    ];
+    if (forSync) args.push("--start-paused");
+    args.push(f);
+    return args;
+  };
+
   if (customPath && fs.existsSync(customPath)) {
     const isVlc = customPath.toLowerCase().includes("vlc");
-    return {
-      exe: customPath,
-      args: isVlc ? (f: string) => [f] : (f: string) => ["--no-terminal", "--force-window=yes", f],
-    };
+    return isVlc
+      ? { exe: customPath, args: vlcArgs, type: "vlc" }
+      : { exe: customPath, args: mpvArgs, type: "mpv" };
   }
 
-  // Build candidate list based on player_mode setting
   const mpvCandidates = [
-    "mpv",
-    "/usr/local/bin/mpv",
-    "/opt/homebrew/bin/mpv",
-    "/usr/bin/mpv",
+    "mpv", "/usr/local/bin/mpv", "/opt/homebrew/bin/mpv", "/usr/bin/mpv",
     "C:\\Program Files\\mpv\\mpv.exe",
     "/Applications/mpv.app/Contents/MacOS/mpv",
   ];
-
   const vlcCandidates = [
-    "vlc",
-    "/usr/bin/vlc",
-    "/usr/local/bin/vlc",
+    "vlc", "/usr/bin/vlc", "/usr/local/bin/vlc",
     "/Applications/VLC.app/Contents/MacOS/VLC",
     "C:\\Program Files\\VideoLAN\\VLC\\vlc.exe",
     "C:\\Program Files (x86)\\VideoLAN\\VLC\\vlc.exe",
   ];
 
-  // Try preferred player first, then fallback
   const ordered = playerMode === "vlc"
     ? [
-        { paths: vlcCandidates, args: (f: string) => [f] },
-        { paths: mpvCandidates, args: (f: string) => ["--no-terminal", "--force-window=yes", f] },
+        { paths: vlcCandidates, args: vlcArgs, type: "vlc" as const },
+        { paths: mpvCandidates, args: mpvArgs, type: "mpv" as const },
       ]
     : [
-        { paths: mpvCandidates, args: (f: string) => ["--no-terminal", "--force-window=yes", f] },
-        { paths: vlcCandidates, args: (f: string) => [f] },
+        { paths: mpvCandidates, args: mpvArgs, type: "mpv" as const },
+        { paths: vlcCandidates, args: vlcArgs, type: "vlc" as const },
       ];
 
   for (const candidate of ordered) {
     for (const p of candidate.paths) {
-      try {
-        if (path.isAbsolute(p)) {
-          if (fs.existsSync(p)) return { exe: p, args: candidate.args };
-        } else {
-          // Non-absolute — try via PATH, will fail at spawn if not found
-          return { exe: p, args: candidate.args };
-        }
-      } catch { /* not found, try next */ }
+      if (path.isAbsolute(p)) {
+        if (fs.existsSync(p)) return { exe: p, args: candidate.args, type: candidate.type };
+      } else {
+        return { exe: p, args: candidate.args, type: candidate.type };
+      }
     }
   }
   return null;
@@ -129,27 +151,26 @@ router.post("/launch", async (req: Request, res: Response) => {
     | { id: number; progress: number; total_episodes: number | null; status: string }
     | undefined;
 
-  if (!anime) {
-    res.status(404).json({ error: "Anime not found" });
-    return;
-  }
-
-  if (!fs.existsSync(filePath)) {
-    res.status(400).json({ error: `File not found: ${filePath}` });
-    return;
-  }
+  if (!anime) { res.status(404).json({ error: "Anime not found" }); return; }
+  if (!fs.existsSync(filePath)) { res.status(400).json({ error: `File not found: ${filePath}` }); return; }
 
   if (session) {
-    try { session.process?.kill(); } catch { /* ignore */ }
+    try { session.process?.kill(); } catch {}
     clearSession();
   }
 
   const player = findPlayer();
   if (!player) {
-    res.status(500).json({
-      error: "No supported video player found. Please install MPV or VLC, or set a custom player path in Settings.",
-    });
+    res.status(500).json({ error: "No supported video player found. Please install MPV or VLC, or set a custom path in Settings." });
     return;
+  }
+
+  // Install VLC lua interface if needed
+  if (player.type === "vlc" && forSync) {
+    const resourcesPath = process.env.USER_DATA_PATH
+      ? path.join(path.dirname(process.execPath), "resources")
+      : path.join(process.cwd(), "resources");
+    installVlcLua(resourcesPath);
   }
 
   const episode = guessEpisode(filePath, anime.total_episodes);
@@ -157,28 +178,28 @@ router.post("/launch", async (req: Request, res: Response) => {
 
   let proc: ChildProcess | null = null;
   try {
-    proc = spawn(player.exe, player.args(filePath), {
-      detached: true,
-      stdio: "ignore",
-    });
+    proc = spawn(player.exe, player.args(filePath, forSync), { detached: true, stdio: "ignore" });
     proc.unref();
-
-    // Catch spawn errors (player not found in PATH)
     proc.on("error", (err) => {
       console.error(`[playback] Player spawn error: ${err.message}`);
       clearSession();
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    res.status(500).json({ error: `Failed to launch player: ${msg}` });
+    res.status(500).json({ error: `Failed to launch player: ${e instanceof Error ? e.message : String(e)}` });
     return;
   }
 
+  // Register player type for sync controller
+  if (forSync) {
+    // Extract VLC port from args
+    const argsStr = player.args(filePath, forSync).join(" ");
+    const vlcPortMatch = argsStr.match(/port="(\d+)"/);
+    const vlcPort = vlcPortMatch ? parseInt(vlcPortMatch[1]) : undefined;
+    setActivePlayer(player.type, vlcPort);
+  }
+
   session = {
-    animeId,
-    episode,
-    filePath,
-    forSync,
+    animeId, episode, filePath, forSync,
     startedAt: Date.now(),
     trackAfterMs,
     tracked: false,
@@ -190,10 +211,7 @@ router.post("/launch", async (req: Request, res: Response) => {
 
   session.tickInterval = setInterval(() => {
     if (!session) return;
-    session.secondsRemaining = Math.max(
-      0,
-      Math.round((trackAfterMs - (Date.now() - session.startedAt)) / 1000)
-    );
+    session.secondsRemaining = Math.max(0, Math.round((trackAfterMs - (Date.now() - session.startedAt)) / 1000));
   }, 1000);
 
   session.trackTimer = setTimeout(async () => {
@@ -213,29 +231,20 @@ router.post("/launch", async (req: Request, res: Response) => {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ watched: true }),
           });
-        } catch { /* episode row may not exist */ }
+        } catch {}
       }
       session.tracked = true;
       session.secondsRemaining = 0;
-      console.log(`[playback] Tracked anime ${animeId} ep ${episode ?? "?"} after ${trackingDelaySecs}s`);
-
-      const ioReq = req as Request & { io?: { to: (r: string) => { emit: (e: string, d: unknown) => void } } };
-      if (ioReq.io) {
-        ioReq.io.to(`anime:${animeId}`).emit("progress:updated", { animeId, episode: currentEp, progress: currentEp });
-      }
     } catch (e) {
       console.error("[playback] Tracking failed:", e);
     }
   }, trackAfterMs);
 
   proc.on("close", () => {
-    console.log(`[playback] Player exited for anime ${animeId}`);
-    setTimeout(() => {
-      if (session?.animeId === animeId) clearSession();
-    }, 10_000);
+    setTimeout(() => { if (session?.animeId === animeId) clearSession(); }, 10_000);
   });
 
-  res.json({ launched: true, player: player.exe, animeId, episode, filePath, trackAfterSecs: trackingDelaySecs });
+  res.json({ launched: true, player: player.exe, playerType: player.type, animeId, episode, filePath, trackAfterSecs: trackingDelaySecs });
 });
 
 // ─── GET /api/playback/status ─────────────────────────────────────────────────
@@ -254,11 +263,52 @@ router.get("/status", (_req: Request, res: Response) => {
   });
 });
 
+// ─── POST /api/playback/sync-control ─────────────────────────────────────────
+// Called by SyncWatch to control local player in response to hub commands
+
+router.post("/sync-control", async (req: Request, res: Response) => {
+  const { action, position, paused } = req.body;
+
+  // Retry connecting a few times — player may have just launched
+  let ctrl = null;
+  for (let i = 0; i < 5; i++) {
+    ctrl = await getController();
+    if (ctrl) break;
+    await new Promise(r => setTimeout(r, 800));
+  }
+
+  if (!ctrl) {
+    res.status(503).json({ error: "No player connected" });
+    return;
+  }
+
+  try {
+    if (action === "seek" && position !== undefined) {
+      await ctrl.seek(position);
+    } else if (action === "setPaused" && paused !== undefined) {
+      await ctrl.setPaused(paused);
+    } else if (action === "seekAndPlay" && position !== undefined) {
+      await ctrl.seek(position);
+      await ctrl.setPaused(false);
+    } else if (action === "getStatus") {
+      const status = await ctrl.getStatus();
+      res.json({ ok: true, status });
+      return;
+    } else {
+      res.status(400).json({ error: "Unknown action" });
+      return;
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: `Player control failed: ${e instanceof Error ? e.message : String(e)}` });
+  }
+});
+
 // ─── POST /api/playback/stop ──────────────────────────────────────────────────
 
 router.post("/stop", (_req: Request, res: Response) => {
   if (!session) { res.json({ stopped: false, reason: "No active session" }); return; }
-  try { session.process?.kill(); } catch { /* ignore */ }
+  try { session.process?.kill(); } catch {}
   clearSession();
   res.json({ stopped: true });
 });
