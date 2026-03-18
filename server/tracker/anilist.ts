@@ -38,11 +38,6 @@ async function gql<T>(
   return json.data as T;
 }
 
-// Rate limit helper — AniList allows 90 requests/minute
-async function sleep(ms: number) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 function normalizeStatus(anilistStatus: string): string {
   const map: Record<string, string> = {
     CURRENT: "WATCHING",
@@ -197,19 +192,22 @@ export class AniListTracker implements ITracker {
   }
 
   async getUserList(token: string): Promise<TrackerUserListEntry[]> {
-    const viewerQ = `query { Viewer { id } }`;
-    const viewerData = await gql<{ Viewer: { id: number } }>(viewerQ, {}, token);
-    const userId = viewerData.Viewer.id;
+    // Get username first (Taiga uses userName not userId — avoids extra round trip)
+    const viewerQ = `query { Viewer { id name } }`;
+    const viewerData = await gql<{ Viewer: { id: number; name: string } }>(viewerQ, {}, token);
+    const userName = viewerData.Viewer.name;
 
-    // ── Pass 1: fetch all list entries (lightweight — no heavy media fields) ──
-    // This avoids AniList's query complexity cap which truncates large lists
+    // Single query matching Taiga's approach:
+    // No genres/description/averageScore — those are heavy fields that cause
+    // AniList's complexity cap to truncate large libraries silently.
+    // They are fetched lazily when the user opens a series detail panel.
     const listQ = `
-      query ($userId: Int) {
-        MediaListCollection(userId: $userId, type: ANIME) {
+      query ($userName: String!) {
+        MediaListCollection(userName: $userName, type: ANIME) {
           lists {
             entries {
               status
-              score
+              score(format: POINT_100)
               progress
               media {
                 id
@@ -220,6 +218,7 @@ export class AniListTracker implements ITracker {
                 episodes
                 season
                 seasonYear
+                averageScore
               }
             }
           }
@@ -227,7 +226,7 @@ export class AniListTracker implements ITracker {
       }
     `;
 
-    type LightEntry = {
+    type ListEntry = {
       status: string;
       score: number;
       progress: number;
@@ -240,87 +239,48 @@ export class AniListTracker implements ITracker {
         episodes: number | null;
         season: string | null;
         seasonYear: number | null;
+        averageScore: number | null;
       };
     };
 
     const listData = await gql<{
-      MediaListCollection: { lists: { entries: LightEntry[] }[] };
-    }>(listQ, { userId }, token);
+      MediaListCollection: { lists: { entries: ListEntry[] }[] };
+    }>(listQ, { userName }, token);
 
-    // Flatten all lists into a single array
-    const rawEntries: LightEntry[] = [];
+    const entries: TrackerUserListEntry[] = [];
     for (const list of listData.MediaListCollection.lists) {
-      rawEntries.push(...list.entries);
-    }
-
-    console.log(`[anilist] Fetched ${rawEntries.length} list entries`);
-
-    // ── Pass 2: batch fetch genres/description/averageScore in chunks of 50 ──
-    // These are heavy fields that cause complexity issues if fetched with the list
-    const mediaIds = rawEntries.map(e => e.media.id);
-    const detailMap = new Map<number, { genres: string[]; description: string | null; averageScore: number | null }>();
-
-    const CHUNK_SIZE = 50;
-    for (let i = 0; i < mediaIds.length; i += CHUNK_SIZE) {
-      const chunk = mediaIds.slice(i, i + CHUNK_SIZE);
-      const detailQ = `
-        query ($ids: [Int]) {
-          Page(perPage: 50) {
-            media(id_in: $ids, type: ANIME) {
-              id
-              genres
-              description(asHtml: false)
-              averageScore
-            }
-          }
-        }
-      `;
-      type DetailMedia = { id: number; genres: string[]; description: string | null; averageScore: number | null };
-      try {
-        const detailData = await gql<{ Page: { media: DetailMedia[] } }>(detailQ, { ids: chunk }, token);
-        for (const m of detailData.Page.media) {
-          detailMap.set(m.id, { genres: m.genres ?? [], description: m.description, averageScore: m.averageScore });
-        }
-      } catch (e) {
-        console.error(`[anilist] Detail batch ${i}-${i + CHUNK_SIZE} failed:`, e);
+      for (const e of list.entries) {
+        entries.push({
+          trackerId: String(e.media.id),
+          titleRomaji: e.media.title.romaji,
+          titleEnglish: e.media.title.english,
+          titleNative: e.media.title.native,
+          coverImage: e.media.coverImage?.large ?? null,
+          bannerImage: e.media.bannerImage ?? null,
+          status: normalizeStatus(e.status),
+          // AniList returns score as POINT_100 (0-100), convert to 0-10
+          score: e.score ? e.score / 10 : null,
+          progress: e.progress,
+          totalEpisodes: e.media.episodes,
+          format: e.media.format,
+          season: e.media.season,
+          seasonYear: e.media.seasonYear,
+          genres: [],
+          description: null,
+          averageScore: e.media.averageScore,
+        } as TrackerUserListEntry & {
+          titleNative: string | null;
+          bannerImage: string | null;
+          season: string | null;
+          seasonYear: number | null;
+          genres: string[];
+          description: string | null;
+          averageScore: number | null;
+        });
       }
-      // Respect rate limit — 90 req/min = ~670ms between requests
-      if (i + CHUNK_SIZE < mediaIds.length) await sleep(700);
     }
 
-    console.log(`[anilist] Fetched details for ${detailMap.size}/${mediaIds.length} entries`);
-
-    // ── Merge ────────────────────────────────────────────────────────────────
-    const entries: TrackerUserListEntry[] = rawEntries.map(e => {
-      const detail = detailMap.get(e.media.id);
-      return {
-        trackerId: String(e.media.id),
-        titleRomaji: e.media.title.romaji,
-        titleEnglish: e.media.title.english,
-        titleNative: e.media.title.native,
-        coverImage: e.media.coverImage?.large ?? null,
-        bannerImage: e.media.bannerImage ?? null,
-        status: normalizeStatus(e.status),
-        score: e.score || null,
-        progress: e.progress,
-        totalEpisodes: e.media.episodes,
-        format: e.media.format,
-        season: e.media.season,
-        seasonYear: e.media.seasonYear,
-        genres: detail?.genres ?? [],
-        description: detail?.description ?? null,
-        averageScore: detail?.averageScore ?? null,
-      } as TrackerUserListEntry & {
-        titleNative: string | null;
-        bannerImage: string | null;
-        season: string | null;
-        seasonYear: number | null;
-        genres: string[];
-        description: string | null;
-        averageScore: number | null;
-      };
-    });
-
+    console.log(`[anilist] Fetched ${entries.length} list entries for ${userName}`);
     return entries;
   }
 }
