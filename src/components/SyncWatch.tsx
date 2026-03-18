@@ -140,6 +140,13 @@ export default function SyncWatch({ anime, settings }: Props) {
       if (!socketRef.current?.connected) return;
 
       try {
+        // First check if a playback session is active — avoid spamming sync-control when no player is running
+        const sessionRes = await api.get<{ active: boolean }>("/api/playback/status");
+        if (!sessionRes.active) {
+          setPlayerConnected(false);
+          return;
+        }
+
         const res = await api.post<{ ok: boolean; status: any }>("/api/playback/sync-control", { action: "getStatus" });
         if (res.ok && res.status) {
           const { position, paused } = res.status;
