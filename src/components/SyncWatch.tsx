@@ -11,15 +11,18 @@ import type { Anime } from "../types/anime";
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface PlaylistItem { mediaId: number; title: string; epNum: number; }
-interface RoomData {
-  playlist: PlaylistItem[];
-  currentIndex: number;
-  readyUsers: Record<string, boolean>;
-  users: string[];
-}
+interface RoomData { playlist: PlaylistItem[]; currentIndex: number; readyUsers: Record<string, boolean>; users: string[]; }
 interface ChatMessage { sender: string; text: string; system?: boolean; }
-interface SyncState { position: number; paused: boolean; }
 interface Props { anime: Anime[]; settings: any; }
+
+// ─── Sync constants (mirrors Syncplay) ────────────────────────────────────────
+
+const SEEK_THRESHOLD = 1.0;          // seconds — both player and global must differ by this to count as a seek
+const REWIND_THRESHOLD = 4.0;        // seconds ahead — force seek back
+const SLOWDOWN_THRESHOLD = 1.5;      // seconds ahead — slow down playback rate
+const SLOWDOWN_RESET_THRESHOLD = 0.1;// seconds — resume normal speed
+const SLOWDOWN_RATE = 0.95;          // playback rate when slowing down
+const POLL_INTERVAL = 1000;          // ms between player polls
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -107,17 +110,29 @@ export default function SyncWatch({ anime, settings }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [newMessage, setNewMessage] = useState("");
   const [localFileCache, setLocalFileCache] = useState<Record<number, any[]>>({});
-  const [syncState, setSyncState] = useState<SyncState>({ position: 0, paused: true });
-  const [localPosition, setLocalPosition] = useState<number | null>(null);
   const [playerConnected, setPlayerConnected] = useState(false);
-  const [syncDiff, setSyncDiff] = useState<number | null>(null);
+  const [localPosition, setLocalPosition] = useState<number | null>(null);
+  const [syncStatus, setSyncStatus] = useState<"synced" | "syncing" | "idle">("idle");
 
   const socketRef = useRef<Socket | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const nicknameRef = useRef("");
   const roomIdRef = useRef("");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const syncStateRef = useRef<SyncState>({ position: 0, paused: true });
+
+  // ── Sync state (mirrors Syncplay client.py) ──────────────────────────────────
+  // Global state = what the server last told us (the room's authoritative state)
+  // Player state = what our local player is actually doing
+  const globalPosition = useRef(0);       // last known global position
+  const globalPaused = useRef(true);      // last known global paused state
+  const lastGlobalUpdate = useRef<number | null>(null); // wall clock of last global update
+  const playerPosition = useRef(0);       // last known local player position
+  const playerPaused = useRef(true);      // last known local player paused state
+  const lastPlayerUpdate = useRef<number | null>(null); // wall clock of last player update
+  const speedChanged = useRef(false);     // whether we've slowed down playback
+  const clientIgnoringOnTheFly = useRef(0); // how many of our own state reports to ignore
+  const serverIgnoringOnTheFly = useRef(0); // how many server state reports to ignore
+  const positionBeforeLastSeek = useRef(0);
 
   const hubUrl = settings?.hub_url || "https://anitrack-hub.onrender.com";
   const myName = nickname || settings?.nickname || "Guest";
@@ -127,12 +142,132 @@ export default function SyncWatch({ anime, settings }: Props) {
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
-  // Keep syncStateRef in sync with state
-  useEffect(() => { syncStateRef.current = syncState; }, [syncState]);
+  // ── Get extrapolated global position (accounts for time elapsed since last update) ──
+  const getGlobalPosition = useCallback((): number => {
+    if (!lastGlobalUpdate.current) return 0;
+    let pos = globalPosition.current;
+    if (!globalPaused.current) {
+      pos += (Date.now() / 1000) - lastGlobalUpdate.current;
+    }
+    return pos;
+  }, []);
 
-  // ── Player polling loop ──────────────────────────────────────────────────────
-  // Every 1s: get local player position, report to hub, apply hub commands
+  // ── Get extrapolated player position ────────────────────────────────────────
+  const getPlayerPosition = useCallback((): number => {
+    if (!lastPlayerUpdate.current) {
+      return lastGlobalUpdate.current ? getGlobalPosition() : 0;
+    }
+    let pos = playerPosition.current;
+    if (!playerPaused.current) {
+      pos += (Date.now() / 1000) - lastPlayerUpdate.current;
+    }
+    return pos;
+  }, [getGlobalPosition]);
 
+  // ── Apply a global state update to local player (mirrors _changePlayerStateAccordingToGlobalState) ──
+  const applyGlobalState = useCallback(async (position: number, paused: boolean, doSeek: boolean, setBy: string | null, messageAge: number) => {
+    // Compensate for network delay — advance position by messageAge
+    if (!paused) position += messageAge;
+
+    const wasGlobalPaused = globalPaused.current;
+    globalPosition.current = position;
+    globalPaused.current = paused;
+    lastGlobalUpdate.current = Date.now() / 1000;
+
+    const pauseChanged = paused !== wasGlobalPaused || paused !== playerPaused.current;
+    const playerPos = getPlayerPosition();
+    const diff = playerPos - position; // positive = we are ahead
+
+    // Only apply if a player is running
+    try {
+      const sessionRes = await api.get<{ active: boolean }>("/api/playback/status");
+      if (!sessionRes.active) return;
+    } catch { return; }
+
+    // First update — just jump to position
+    if (!lastPlayerUpdate.current) {
+      await api.post("/api/playback/sync-control", { action: "seekAndPlay", position });
+      if (paused) await api.post("/api/playback/sync-control", { action: "setPaused", paused: true });
+      return;
+    }
+
+    // Explicit seek from another user — jump to their position
+    if (doSeek && setBy && setBy !== myName) {
+      positionBeforeLastSeek.current = playerPos;
+      await api.post("/api/playback/sync-control", { action: "seek", position });
+      return;
+    }
+
+    // We are too far ahead — rewind
+    if (diff > REWIND_THRESHOLD && !doSeek) {
+      await api.post("/api/playback/sync-control", { action: "seek", position });
+      return;
+    }
+
+    // We are slightly ahead — slow down (0.95x) to drift back into sync
+    // We are back in sync — restore normal speed
+    if (!paused) {
+      if (diff > SLOWDOWN_THRESHOLD && !speedChanged.current) {
+        speedChanged.current = true;
+        setSyncStatus("syncing");
+        // Note: speed control requires player-specific API — skip for now, rely on rewind
+      } else if (diff < SLOWDOWN_RESET_THRESHOLD && speedChanged.current) {
+        speedChanged.current = false;
+        setSyncStatus("synced");
+      }
+    }
+
+    // Pause/unpause changed
+    if (pauseChanged) {
+      if (paused) {
+        await api.post("/api/playback/sync-control", { action: "setPaused", paused: true });
+      } else {
+        await api.post("/api/playback/sync-control", { action: "setPaused", paused: false });
+      }
+    }
+  }, [myName, getPlayerPosition]);
+
+  // ── Determine if local player state change counts as a seek ──────────────────
+  // Mirrors Syncplay: seeked = playerDiff > threshold AND globalDiff > threshold
+  const determineStateChange = useCallback((pos: number, paused: boolean): { pauseChange: boolean; seeked: boolean } => {
+    const pauseChange = playerPaused.current !== paused && globalPaused.current !== paused;
+    const playerDiff = Math.abs(getPlayerPosition() - pos);
+    const globalDiff = Math.abs(getGlobalPosition() - pos);
+    const seeked = playerDiff > SEEK_THRESHOLD && globalDiff > SEEK_THRESHOLD;
+    return { pauseChange, seeked };
+  }, [getPlayerPosition, getGlobalPosition]);
+
+  // ── Send our state to the hub ────────────────────────────────────────────────
+  const sendState = useCallback((position: number, paused: boolean, seeked: boolean, stateChange: boolean) => {
+    if (!socketRef.current?.connected) return;
+    if (!stateChange && !seeked) return; // Only send on actual changes or periodically
+
+    const doSeek = seeked;
+    if (doSeek) clientIgnoringOnTheFly.current += 1;
+
+    const payload: any = {
+      roomId: roomIdRef.current,
+      position,
+      paused,
+      doSeek,
+      setBy: nicknameRef.current,
+    };
+
+    if (serverIgnoringOnTheFly.current > 0 || clientIgnoringOnTheFly.current > 0) {
+      payload.ignoringOnTheFly = {};
+      if (serverIgnoringOnTheFly.current > 0) {
+        payload.ignoringOnTheFly.server = serverIgnoringOnTheFly.current;
+        serverIgnoringOnTheFly.current = 0;
+      }
+      if (clientIgnoringOnTheFly.current > 0) {
+        payload.ignoringOnTheFly.client = clientIgnoringOnTheFly.current;
+      }
+    }
+
+    socketRef.current.emit("state", payload);
+  }, []);
+
+  // ── Player poll (runs every 1s) ───────────────────────────────────────────────
   const startPolling = useCallback(() => {
     if (pollRef.current) clearInterval(pollRef.current);
 
@@ -140,44 +275,45 @@ export default function SyncWatch({ anime, settings }: Props) {
       if (!socketRef.current?.connected) return;
 
       try {
-        // First check if a playback session is active — avoid spamming sync-control when no player is running
+        // Check if a session is active first
         const sessionRes = await api.get<{ active: boolean }>("/api/playback/status");
         if (!sessionRes.active) {
           setPlayerConnected(false);
           return;
         }
 
+        // Get current player position and paused state
         const res = await api.post<{ ok: boolean; status: any }>("/api/playback/sync-control", { action: "getStatus" });
-        if (res.ok && res.status) {
-          const { position, paused } = res.status;
-          setLocalPosition(position);
-          setPlayerConnected(true);
+        if (!res.ok || !res.status) { setPlayerConnected(false); return; }
 
-          // Report to hub
-          socketRef.current?.emit("player-status", {
-            roomId: roomIdRef.current,
-            user: nicknameRef.current,
-            position,
-            paused,
-          });
+        const { position, paused } = res.status;
+        setPlayerConnected(true);
+        setLocalPosition(position);
 
-          // Calculate sync diff
-          const auth = syncStateRef.current;
-          setSyncDiff(Math.abs(position - auth.position));
-        } else {
-          setPlayerConnected(false);
+        const { pauseChange, seeked } = determineStateChange(position, paused);
+
+        // Update player state refs
+        playerPosition.current = position;
+        playerPaused.current = paused;
+        lastPlayerUpdate.current = Date.now() / 1000;
+
+        // Send state to hub if something changed or periodically
+        const stateChange = pauseChange || seeked;
+        sendState(position, paused, seeked, stateChange);
+
+        // Update sync status display
+        if (lastGlobalUpdate.current) {
+          const diff = Math.abs(position - getGlobalPosition());
+          setSyncStatus(diff < 2 ? "synced" : "syncing");
         }
       } catch {
         setPlayerConnected(false);
       }
-    }, 1000);
-  }, []);
+    }, POLL_INTERVAL);
+  }, [determineStateChange, sendState, getGlobalPosition]);
 
   const stopPolling = useCallback(() => {
-    if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
   }, []);
 
   // ── Socket connection ────────────────────────────────────────────────────────
@@ -214,22 +350,25 @@ export default function SyncWatch({ anime, settings }: Props) {
 
     socket.on("message", (msg: ChatMessage) => setMessages(prev => [...prev, msg]));
 
-    // Hub's authoritative sync state changed (someone played/paused/seeked)
-    socket.on("sync-state", (state: SyncState) => {
-      setSyncState(state);
-      syncStateRef.current = state;
-    });
-
-    // Hub tells this specific client to sync up
-    socket.on("sync-command", async ({ target, position, paused }: { target: string; position: number; paused: boolean }) => {
-      if (target !== nicknameRef.current) return;
-      try {
-        await api.post("/api/playback/sync-control", { action: "seekAndPlay", position });
-        if (paused) {
-          await api.post("/api/playback/sync-control", { action: "setPaused", paused: true });
+    // ── Core: receive state from another user (mirrors handleState in protocols.py) ──
+    socket.on("state", ({ position, paused, doSeek, setBy, ignoringOnTheFly }: any) => {
+      // Handle ignoringOnTheFly counters
+      if (ignoringOnTheFly) {
+        if (ignoringOnTheFly.server !== undefined) {
+          serverIgnoringOnTheFly.current = ignoringOnTheFly.server;
+          clientIgnoringOnTheFly.current = 0;
         }
-      } catch {
-        // Player may not be running
+        if (ignoringOnTheFly.client !== undefined) {
+          if (ignoringOnTheFly.client === clientIgnoringOnTheFly.current) {
+            clientIgnoringOnTheFly.current = 0;
+          }
+        }
+      }
+
+      // Only apply if we are not ignoring
+      if (clientIgnoringOnTheFly.current === 0) {
+        const messageAge = 0.05; // rough network delay estimate ~50ms
+        applyGlobalState(position, paused, doSeek, setBy, messageAge);
       }
     });
 
@@ -247,15 +386,20 @@ export default function SyncWatch({ anime, settings }: Props) {
             forSync: true,
             trackingDelaySecs: parseInt(settings?.tracking_delay || "180"),
           });
+          // Reset sync state for new episode
+          globalPosition.current = 0;
+          globalPaused.current = true;
+          lastGlobalUpdate.current = null;
+          playerPosition.current = 0;
+          playerPaused.current = true;
+          lastPlayerUpdate.current = null;
           setMessages(prev => [...prev, {
             sender: "system",
-            text: `Launched ${animeData.title?.romaji || "episode"} Ep ${target.epNum}`,
+            text: `Launching ${animeData.title?.romaji || "episode"} Ep ${target.epNum}`,
             system: true,
           }]);
         }
-      } catch (e) {
-        console.error("[sync] Auto-launch failed:", e);
-      }
+      } catch (e) { console.error("[sync] Auto-launch failed:", e); }
     });
 
     return () => {
@@ -265,9 +409,9 @@ export default function SyncWatch({ anime, settings }: Props) {
       socketRef.current = null;
       setConnected(false);
     };
-  }, [isJoined, hubUrl, startPolling, stopPolling]);
+  }, [isJoined, hubUrl, startPolling, stopPolling, applyGlobalState]);
 
-  // ── Load local file cache for queue items ────────────────────────────────────
+  // ── Load local file cache ────────────────────────────────────────────────────
 
   useEffect(() => {
     if (!isJoined || roomData.playlist.length === 0) return;
@@ -295,13 +439,20 @@ export default function SyncWatch({ anime, settings }: Props) {
 
   const handleLeave = () => {
     stopPolling();
+    socketRef.current?.emit("leave-room", { roomId: roomIdRef.current, username: nicknameRef.current });
     socketRef.current?.disconnect();
     setIsJoined(false);
     setRoomData({ playlist: [], currentIndex: 0, readyUsers: {}, users: [] });
     setMessages([]);
-    setSyncState({ position: 0, paused: true });
     setLocalPosition(null);
     setPlayerConnected(false);
+    setSyncStatus("idle");
+    globalPosition.current = 0;
+    globalPaused.current = true;
+    lastGlobalUpdate.current = null;
+    playerPosition.current = 0;
+    playerPaused.current = true;
+    lastPlayerUpdate.current = null;
   };
 
   const toggleReady = () => {
@@ -328,31 +479,10 @@ export default function SyncWatch({ anime, settings }: Props) {
     setNewMessage("");
   };
 
-  // Manual play/pause/seek — broadcast to hub which then reconciles everyone
-  const handlePlay = async () => {
-    try {
-      const res = await api.post<{ ok: boolean; status: any }>("/api/playback/sync-control", { action: "getStatus" });
-      const pos = res.status?.position ?? syncState.position;
-      socketRef.current?.emit("sync-play", { roomId, position: pos });
-      await api.post("/api/playback/sync-control", { action: "setPaused", paused: false });
-    } catch {}
-  };
-
-  const handlePause = async () => {
-    try {
-      const res = await api.post<{ ok: boolean; status: any }>("/api/playback/sync-control", { action: "getStatus" });
-      const pos = res.status?.position ?? syncState.position;
-      socketRef.current?.emit("sync-pause", { roomId, position: pos });
-      await api.post("/api/playback/sync-control", { action: "setPaused", paused: true });
-    } catch {}
-  };
-
   const hasFile = (mediaId: number, epNum: number): boolean => {
     const files = localFileCache[mediaId] || [];
     return files.some((f: any) => guessEpisode(f.name) === epNum);
   };
-
-  const inSync = syncDiff !== null && syncDiff < 2.5;
 
   if (!isJoined) {
     return <JoinScreen onJoin={handleJoin} defaultNickname={settings?.nickname || ""} />;
@@ -371,34 +501,23 @@ export default function SyncWatch({ anime, settings }: Props) {
           }
         </div>
 
-        {/* Sync status bar */}
+        {/* Sync indicator */}
         {playerConnected && localPosition !== null && (
           <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold border ${
-            inSync
+            syncStatus === "synced"
               ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400"
-              : "bg-amber-500/10 border-amber-500/20 text-amber-400"
+              : syncStatus === "syncing"
+              ? "bg-amber-500/10 border-amber-500/20 text-amber-400"
+              : "bg-zinc-800 border-white/5 text-zinc-500"
           }`}>
             <Radio className="w-3 h-3" />
-            {inSync ? `In sync · ${formatTime(localPosition)}` : `Syncing… ${syncDiff !== null ? `${syncDiff.toFixed(1)}s off` : ""}`}
+            {syncStatus === "synced" && `In sync · ${formatTime(localPosition)}`}
+            {syncStatus === "syncing" && `Catching up… · ${formatTime(localPosition)}`}
+            {syncStatus === "idle" && formatTime(localPosition)}
           </div>
         )}
 
         <div className="flex-1" />
-
-        {/* Play / Pause controls */}
-        {playerConnected && (
-          <div className="flex gap-2">
-            <button onClick={handlePause}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-800 border border-white/5 text-zinc-400 hover:text-zinc-200 text-xs font-bold transition-all">
-              ⏸ Pause All
-            </button>
-            <button onClick={handlePlay}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500 text-black text-xs font-bold hover:bg-emerald-400 transition-all">
-              ▶ Play All
-            </button>
-          </div>
-        )}
-
         <button onClick={handleLeave}
           className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 border border-white/8 text-zinc-500 hover:text-zinc-300 hover:bg-white/8 transition-all text-sm">
           <LogOut className="w-4 h-4" /> Leave Room
@@ -446,9 +565,9 @@ export default function SyncWatch({ anime, settings }: Props) {
                   className={`flex items-center gap-4 p-4 rounded-xl border transition-all group cursor-pointer ${
                     isCurrent ? "bg-emerald-500/8 border-emerald-500/30" : "bg-black/20 border-white/5 hover:border-white/10 opacity-60 hover:opacity-100"
                   }`}>
-                  <div className={`w-7 h-7 rounded-lg flex items-center justify-center font-mono text-xs font-bold flex-shrink-0 ${
-                    isCurrent ? "bg-emerald-500 text-black" : "bg-zinc-800 text-zinc-500"
-                  }`}>{idx + 1}</div>
+                  <div className={`w-7 h-7 rounded-lg flex items-center justify-center font-mono text-xs font-bold flex-shrink-0 ${isCurrent ? "bg-emerald-500 text-black" : "bg-zinc-800 text-zinc-500"}`}>
+                    {idx + 1}
+                  </div>
                   <div className="flex-1 min-w-0">
                     <p className="font-semibold text-sm text-zinc-200 truncate">{item.title}</p>
                     <p className="text-[10px] text-zinc-600 uppercase font-bold tracking-wider mt-0.5">{epLabel(item.epNum)}</p>
@@ -471,8 +590,6 @@ export default function SyncWatch({ anime, settings }: Props) {
 
         {/* Right: Users + Chat */}
         <div className="w-72 flex-shrink-0 flex flex-col gap-4 min-h-0">
-
-          {/* Users list */}
           <div className="bg-zinc-900/40 border border-white/5 rounded-2xl overflow-hidden flex-shrink-0">
             <div className="px-4 py-3 border-b border-white/5 flex items-center gap-2">
               <Users className="w-4 h-4 text-zinc-500" />
@@ -495,7 +612,6 @@ export default function SyncWatch({ anime, settings }: Props) {
             </div>
           </div>
 
-          {/* Chat */}
           <div className="flex-1 flex flex-col bg-zinc-900/40 border border-white/5 rounded-2xl overflow-hidden min-h-0">
             <div className="px-4 py-3 border-b border-white/5 flex items-center gap-2 flex-shrink-0">
               <MessageSquare className="w-4 h-4 text-zinc-500" />
