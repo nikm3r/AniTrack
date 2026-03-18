@@ -31,6 +31,8 @@ const config = {
         authors: "nikm3r",
         description: "Anime tracking desktop app",
         setupIcon: "./icon.ico",
+        exe: "AniTrack.exe",
+        title: "AniTrack",
       },
     },
     {
