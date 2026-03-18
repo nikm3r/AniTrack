@@ -22,7 +22,7 @@ const REWIND_THRESHOLD = 4.0;        // seconds ahead — force seek back
 const SLOWDOWN_THRESHOLD = 1.5;      // seconds ahead — slow down playback rate
 const SLOWDOWN_RESET_THRESHOLD = 0.1;// seconds — resume normal speed
 const SLOWDOWN_RATE = 0.95;          // playback rate when slowing down
-const POLL_INTERVAL = 200;           // ms between player polls — fast enough for responsive sync
+const POLL_INTERVAL = 1000;          // ms between player polls
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -131,6 +131,7 @@ export default function SyncWatch({ anime, settings }: Props) {
   const lastPlayerUpdate = useRef<number | null>(null); // wall clock of last player update
   const speedChanged = useRef(false);     // whether we've slowed down playback
   const clientIgnoringOnTheFly = useRef(0); // how many of our own state reports to ignore
+  const lastFullSend = useRef(0); // timestamp of last periodic state send
   const serverIgnoringOnTheFly = useRef(0); // how many server state reports to ignore
   const positionBeforeLastSeek = useRef(0);
 
@@ -191,15 +192,17 @@ export default function SyncWatch({ anime, settings }: Props) {
       return;
     }
 
-    // Explicit seek from another user — jump to their position
+    // Explicit seek from another user — jump to their position and suppress echo
     if (doSeek && setBy && setBy !== myName) {
       positionBeforeLastSeek.current = playerPos;
+      clientIgnoringOnTheFly.current += 1;
       await api.post("/api/playback/sync-control", { action: "seek", position });
       return;
     }
 
-    // We are too far ahead — rewind
+    // We are too far ahead — rewind and suppress echo
     if (diff > REWIND_THRESHOLD && !doSeek) {
+      clientIgnoringOnTheFly.current += 1;
       await api.post("/api/playback/sync-control", { action: "seek", position });
       return;
     }
@@ -217,8 +220,9 @@ export default function SyncWatch({ anime, settings }: Props) {
       }
     }
 
-    // Pause/unpause changed
+    // Pause/unpause changed — apply and suppress our next echo
     if (pauseChanged) {
+      clientIgnoringOnTheFly.current += 1; // suppress echo of this change
       if (paused) {
         await api.post("/api/playback/sync-control", { action: "setPaused", paused: true });
       } else {
@@ -297,9 +301,9 @@ export default function SyncWatch({ anime, settings }: Props) {
         playerPaused.current = paused;
         lastPlayerUpdate.current = Date.now() / 1000;
 
-        // Send state on every poll — at 200ms this is fine and keeps everyone in sync
+        // Send state to hub if something changed or periodically
         const stateChange = pauseChange || seeked;
-        sendState(position, paused, seeked, true);
+        sendState(position, paused, seeked, stateChange);
 
         // Update sync status display
         if (lastGlobalUpdate.current) {
