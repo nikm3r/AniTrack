@@ -165,12 +165,11 @@ router.post("/launch", async (req: Request, res: Response) => {
     return;
   }
 
-  // Install VLC lua interface if needed
-  if (player.type === "vlc" && forSync) {
-    const resourcesPath = process.env.USER_DATA_PATH
-      ? path.join(path.dirname(process.execPath), "resources")
-      : path.join(process.cwd(), "resources");
-    installVlcLua(resourcesPath);
+  // Always install VLC lua interface when using VLC so sync is always ready
+  if (player.type === "vlc") {
+    const resourcesPath = (process as any).resourcesPath || path.join(process.cwd(), "resources");
+    const installed = installVlcLua(resourcesPath);
+    console.log(`[playback] VLC lua install: ${installed ? "ok" : "failed"} (src: ${resourcesPath})`);
   }
 
   const episode = guessEpisode(filePath, anime.total_episodes);
