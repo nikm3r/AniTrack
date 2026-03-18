@@ -348,7 +348,18 @@ export default function SyncWatch({ anime, settings }: Props) {
 
     socket.on("playlist-updated", (data: RoomData) => setRoomData(data));
 
-    socket.on("message", (msg: ChatMessage) => setMessages(prev => [...prev, msg]));
+    socket.on("message", (msg: ChatMessage) => {
+      setMessages(prev => [...prev, msg]);
+      // Pause on user leave (mirrors Syncplay pauseOnLeave behaviour)
+      if (msg.system && msg.text?.includes("left the room")) {
+        api.post("/api/playback/sync-control", { action: "setPaused", paused: true }).catch(() => {});
+        api.get<{ active: boolean }>("/api/playback/status").then(res => {
+          if (res.active) {
+            setMessages(prev => [...prev, { sender: "system", text: "Paused — someone left the room", system: true }]);
+          }
+        }).catch(() => {});
+      }
+    });
 
     // ── Core: receive state from another user (mirrors handleState in protocols.py) ──
     socket.on("state", ({ position, paused, doSeek, setBy, ignoringOnTheFly }: any) => {

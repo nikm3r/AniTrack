@@ -351,24 +351,42 @@ export function getVlcIntfPaths(): { intfPath: string; userPath: string } | null
     const appdata = process.env.APPDATA || home;
     return {
       intfPath: "",
-      userPath: path.join(appdata, "VLC\\lua\\intf\\"),
+      userPath: path.join(appdata, "VLC", "lua", "intf"),
     };
   }
   return null;
 }
 
-export function installVlcLua(resourcesPath: string): boolean {
+export function installVlcLua(resourcesPath: string, vlcExePath?: string): boolean {
+  const src = path.join(resourcesPath, "syncplay.lua");
+  if (!fs.existsSync(src)) {
+    console.error(`[vlc] syncplay.lua not found at: ${src}`);
+    return false;
+  }
+
+  // For portable VLC, install next to the executable
+  if (vlcExePath && vlcExePath.toLowerCase().includes("portable")) {
+    const portableIntf = path.join(path.dirname(vlcExePath), "App", "vlc", "lua", "intf");
+    try {
+      fs.mkdirSync(portableIntf, { recursive: true });
+      fs.copyFileSync(src, path.join(portableIntf, "syncplay.lua"));
+      console.log(`[vlc] Installed syncplay.lua to portable path: ${portableIntf}`);
+      return true;
+    } catch (e) {
+      console.error(`[vlc] Failed to install to portable path: ${e}`);
+    }
+  }
+
   const paths = getVlcIntfPaths();
   if (!paths) return false;
-
-  const src = path.join(resourcesPath, "syncplay.lua");
-  if (!fs.existsSync(src)) return false;
 
   try {
     fs.mkdirSync(paths.userPath, { recursive: true });
     fs.copyFileSync(src, path.join(paths.userPath, "syncplay.lua"));
+    console.log(`[vlc] Installed syncplay.lua to: ${paths.userPath}`);
     return true;
-  } catch {
+  } catch (e) {
+    console.error(`[vlc] Failed to install syncplay.lua: ${e}`);
     return false;
   }
 }
