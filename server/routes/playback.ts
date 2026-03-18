@@ -189,9 +189,8 @@ router.post("/launch", async (req: Request, res: Response) => {
     return;
   }
 
-  // Register player type for sync controller
-  if (forSync) {
-    // Extract VLC port from args
+  // Always register player controller so sync-control works regardless of forSync flag
+  {
     const argsStr = player.args(filePath, forSync).join(" ");
     const vlcPortMatch = argsStr.match(/port="(\d+)"/);
     const vlcPort = vlcPortMatch ? parseInt(vlcPortMatch[1]) : undefined;

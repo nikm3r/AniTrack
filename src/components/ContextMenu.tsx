@@ -34,11 +34,24 @@ function epLabel(n: number): string {
   return `Episode ${String(n).padStart(2, "0")}`;
 }
 
-function guessEpisode(filename: string): number | null {
-  const patterns = [/[Ee][Pp]?(\d{1,3})/, / - (\d{2,3})[\s\[.]/, /\s(\d{2,3})[\s\[.]/, /_(\d{2,3})[_\[.]/];
+function guessEpisode(filename: string, totalEpisodes?: number | null): number | null {
+  const base = filename.split("/").pop()?.split("\\").pop() || filename;
+  // Strip hex hashes like [E44435E5] before matching
+  const clean = base.replace(/\.[^.]+$/, "").replace(/\[[0-9A-Fa-f]{6,8}\]/g, "").trim();
+  const patterns = [
+    /[Ee][Pp]?(\d{1,3})/,
+    / - (\d{2,3})[\s\[.]/,
+    /\s(\d{2,3})[\s\[.]/,
+    /_(\d{2,3})[_\[.]/,
+  ];
   for (const re of patterns) {
-    const m = filename.match(re);
-    if (m) return parseInt(m[1], 10);
+    const m = clean.match(re);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      // Skip if number exceeds total episodes — likely a year or other false match
+      if (totalEpisodes && n > totalEpisodes) continue;
+      return n;
+    }
   }
   return null;
 }
@@ -103,13 +116,13 @@ export default function ContextMenu({ x, y, anime, onClose, onUpdate, onSearchRe
   }, [anime.id]);
 
   const sortedFiles = files
-    ? [...files].sort((a, b) => (guessEpisode(a.name) ?? 999) - (guessEpisode(b.name) ?? 999))
+    ? [...files].sort((a, b) => (guessEpisode(a.name, (anime as any).total_episodes) ?? 999) - (guessEpisode(b.name, (anime as any).total_episodes) ?? 999))
     : [];
 
     const launchFile = async (filePath: string, forSync = false) => {
       if (forSync) {
         // Add to room queue via socket — do NOT launch locally
-        const ep = guessEpisode(filePath.split("/").pop() || filePath);
+        const ep = guessEpisode(filePath.split("/").pop() || filePath, (anime as any).total_episodes);
         const socket = (window as any).__syncSocket;
         const roomId = localStorage.getItem("last_room_id");
         if (socket && roomId) {
@@ -178,7 +191,7 @@ export default function ContextMenu({ x, y, anime, onClose, onUpdate, onSearchRe
           </div>
         )}
         {sortedFiles.map((f, i) => {
-          const ep = guessEpisode(f.name);
+          const ep = guessEpisode(f.name, (anime as any).total_episodes);
           return (
             <button key={i} onClick={() => launchFile(f.fullPath, forSync)}
               className="w-full px-4 py-2 text-left text-xs text-zinc-300 hover:bg-emerald-500/10 hover:text-emerald-400 transition-colors flex items-center gap-2">

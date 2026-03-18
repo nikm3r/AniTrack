@@ -31,6 +31,7 @@ export class MpvController implements IPlayerController {
   private buffer = "";
   private observers = new Map<string, (val: any) => void>();
   private _status: PlayerStatus = { position: 0, paused: true, filename: null };
+  private _lastUpdate = 0;
 
   constructor(private socketPath: string) {}
 
@@ -116,10 +117,16 @@ export class MpvController implements IPlayerController {
     this._sendRaw({ command: ["observe_property", 3, "filename"] });
 
     this.observers.set("time-pos", (val) => {
-      if (val !== null && val !== undefined) this._status.position = val;
+      if (val !== null && val !== undefined) {
+        this._status.position = val;
+        this._lastUpdate = Date.now();
+      }
     });
     this.observers.set("pause", (val) => {
-      if (val !== null && val !== undefined) this._status.paused = val;
+      if (val !== null && val !== undefined) {
+        this._status.paused = val;
+        this._lastUpdate = Date.now();
+      }
     });
     this.observers.set("filename", (val) => {
       this._status.filename = val ?? null;
@@ -155,6 +162,8 @@ export class MpvController implements IPlayerController {
 
   async getStatus(): Promise<PlayerStatus | null> {
     if (!this.connected) return null;
+    // If we haven't received any time-pos update, player hasn't started playing yet
+    if (this._lastUpdate === 0) return null;
     return { ...this._status };
   }
 
@@ -181,6 +190,7 @@ export class VlcController implements IPlayerController {
   private connected = false;
   private buffer = "";
   private _status: PlayerStatus = { position: 0, paused: true, filename: null };
+  private _lastUpdate = 0;
   private pendingLines: Array<(line: string) => void> = [];
 
   constructor(private port: number) {}
@@ -253,7 +263,7 @@ export class VlcController implements IPlayerController {
     const poll = () => {
       if (!this.connected) return;
       this._send(".");
-      setTimeout(poll, 1000);
+      setTimeout(poll, 200);
     };
     poll();
   }
@@ -264,6 +274,8 @@ export class VlcController implements IPlayerController {
 
   async getStatus(): Promise<PlayerStatus | null> {
     if (!this.connected) return null;
+    // If we haven't received any time-pos update, player hasn't started playing yet
+    if (this._lastUpdate === 0) return null;
     return { ...this._status };
   }
 

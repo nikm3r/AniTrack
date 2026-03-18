@@ -22,7 +22,7 @@ const REWIND_THRESHOLD = 4.0;        // seconds ahead — force seek back
 const SLOWDOWN_THRESHOLD = 1.5;      // seconds ahead — slow down playback rate
 const SLOWDOWN_RESET_THRESHOLD = 0.1;// seconds — resume normal speed
 const SLOWDOWN_RATE = 0.95;          // playback rate when slowing down
-const POLL_INTERVAL = 1000;          // ms between player polls
+const POLL_INTERVAL = 200;           // ms between player polls — fast enough for responsive sync
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -297,9 +297,9 @@ export default function SyncWatch({ anime, settings }: Props) {
         playerPaused.current = paused;
         lastPlayerUpdate.current = Date.now() / 1000;
 
-        // Send state to hub if something changed or periodically
+        // Send state on every poll — at 200ms this is fine and keeps everyone in sync
         const stateChange = pauseChange || seeked;
-        sendState(position, paused, seeked, stateChange);
+        sendState(position, paused, seeked, true);
 
         // Update sync status display
         if (lastGlobalUpdate.current) {
