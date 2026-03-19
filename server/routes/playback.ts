@@ -41,18 +41,28 @@ function clearSession() {
 function guessEpisode(filename: string, totalEpisodes?: number | null): number | null {
   const base = path.basename(filename);
   const clean = base.replace(/\.[^.]+$/, "").replace(/\[[0-9A-Fa-f]{6,8}\]/g, "").trim();
-  const patterns = [
-    /[Ee][Pp]?(\d{1,3})/,
-    / - (\d{2,3})[\s\[.]/,
-    /\s(\d{2,3})[\s\[.]/,
-    /_(\d{2,3})[_\[.]/,
+
+  const tryN = (n: number): number | null => {
+    if (n <= 0) return null;
+    if (totalEpisodes && n > totalEpisodes) return null;
+    return n;
+  };
+
+  const patterns: RegExp[] = [
+    /[Ss]\d{1,2}[Ee](\d{1,3})/,                    // S01E03
+    /[Ss]eason\s*\d+\s*[Ee]pisode\s*(\d{1,3})/i, // Season 1 Episode 3
+    /[Ee]pisode\s*(\d{1,3})/i,                       // Episode 03
+    /[Ee]p?\.?\s*(\d{1,3})(?!\d)/,                 // EP03, Ep 3
+    / - (\d{2,3})[\s\[.(]/,                         // " - 03 "
+    /[_ ](\d{2,3})[_\[. ]/,                          // _03_
+    /(?:^|[\s_\-])0*(\d{1,3})\s*$/,                // trailing bare number
   ];
+
   for (const re of patterns) {
     const m = clean.match(re);
     if (m) {
-      const n = parseInt(m[1], 10);
-      if (totalEpisodes && n > totalEpisodes) continue;
-      return n;
+      const result = tryN(parseInt(m[1], 10));
+      if (result !== null) return result;
     }
   }
   return null;
@@ -103,17 +113,35 @@ function findPlayer(): { exe: string; args: (filePath: string, forSync: boolean)
       : { exe: customPath, args: mpvArgs, type: "mpv" };
   }
 
+  // Build Windows paths using APPDATA/ProgramFiles env vars if available
+  const pf = process.env["ProgramFiles"] || "C:\\Program Files";
+  const pf86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
+  const localAppData = process.env["LOCALAPPDATA"] || "";
+  const appData = process.env["APPDATA"] || "";
+
   const mpvCandidates = [
-    "mpv", "/usr/local/bin/mpv", "/opt/homebrew/bin/mpv", "/usr/bin/mpv",
-    "C:\\Program Files\\mpv\\mpv.exe",
+    "mpv",
+    "/usr/local/bin/mpv",
+    "/opt/homebrew/bin/mpv",
+    "/usr/bin/mpv",
     "/Applications/mpv.app/Contents/MacOS/mpv",
-  ];
+    `${pf}\\mpv\\mpv.exe`,
+    `${pf86}\\mpv\\mpv.exe`,
+    `${localAppData}\\mpv\\mpv.exe`,
+    // Scoop install
+    `${process.env["USERPROFILE"] || "C:\\Users\\User"}\\scoop\\apps\\mpv\\current\\mpv.exe`,
+  ].filter(Boolean);
+
   const vlcCandidates = [
-    "vlc", "/usr/bin/vlc", "/usr/local/bin/vlc",
+    "vlc",
+    "/usr/bin/vlc",
+    "/usr/local/bin/vlc",
     "/Applications/VLC.app/Contents/MacOS/VLC",
-    "C:\\Program Files\\VideoLAN\\VLC\\vlc.exe",
-    "C:\\Program Files (x86)\\VideoLAN\\VLC\\vlc.exe",
-  ];
+    `${pf}\\VideoLAN\\VLC\\vlc.exe`,
+    `${pf86}\\VideoLAN\\VLC\\vlc.exe`,
+    // Portable VLC — check next to exe and common locations
+    `${appData}\\VLC\\vlc.exe`,
+  ].filter(Boolean);
 
   const ordered = playerMode === "vlc"
     ? [
