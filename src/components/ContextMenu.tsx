@@ -36,14 +36,37 @@ function epLabel(n: number): string {
 
 function guessEpisode(filename: string, totalEpisodes?: number | null): number | null {
   const base = filename.split("/").pop()?.split("\\").pop() || filename;
+  // Strip extension and hex hashes like [E44435E5]
   const clean = base.replace(/\.[^.]+$/, "").replace(/\[[0-9A-Fa-f]{6,8}\]/g, "").trim();
-  const patterns = [/[Ee][Pp]?(\d{1,3})/, / - (\d{2,3})[\s\[.]/, /\s(\d{2,3})[\s\[.]/, /_(\d{2,3})[_\[.]/];
+
+  const tryN = (n: number): number | null => {
+    if (n <= 0) return null;
+    if (totalEpisodes && n > totalEpisodes) return null;
+    return n;
+  };
+
+  const patterns: RegExp[] = [
+    // S01E03, S1E3, s01e03
+    /[Ss]\d{1,2}[Ee](\d{1,3})/,
+    // Season 1 Episode 3, Season 01 Episode 03
+    /[Ss]eason\s*\d+\s*[Ee]pisode\s*(\d{1,3})/i,
+    // Episode 03, Ep 03, EP03
+    /[Ee]pisode\s*(\d{1,3})/i,
+    /[Ee]p?\.?\s*(\d{1,3})(?!\d)/,
+    // " - 03 " style (group releases)
+    / - (\d{2,3})[\s\[.(]/,
+    // _03_ or _03.
+    /[_ ](\d{2,3})[_\[. ]/,
+    // Trailing bare number: "Show Name 03" or "Show Name - 03"
+    /(?:^|[\s_\-])0*(\d{1,3})\s*$/,
+  ];
+
   for (const re of patterns) {
     const m = clean.match(re);
     if (m) {
       const n = parseInt(m[1], 10);
-      if (totalEpisodes && n > totalEpisodes) continue;
-      return n;
+      const result = tryN(n);
+      if (result !== null) return result;
     }
   }
   return null;
@@ -174,7 +197,14 @@ export default function ContextMenu({ x, y, anime, onClose, onUpdate, onSearchRe
       <div
         onMouseEnter={() => showItem(key)}
         onMouseLeave={hideItem}
-        className="absolute left-full top-0 ml-1.5 w-96 bg-zinc-900 border border-white/10 rounded-xl shadow-2xl shadow-black/60 py-1.5 z-[902] max-h-96 overflow-y-auto scrollbar-thin"
+        className="absolute top-0 ml-1.5 w-96 bg-zinc-900 border border-white/10 rounded-xl shadow-2xl shadow-black/60 py-1.5 z-[902]"
+        style={{
+          ...(typeof window !== "undefined" && pos.x + 400 > window.innerWidth
+            ? { right: "100%", left: "auto" }
+            : { left: "100%", right: "auto" }),
+          maxHeight: "min(70vh, 480px)",
+          overflowY: "auto",
+        }}
       >
         {loadingFiles && <p className="text-xs text-zinc-600 px-4 py-2">Scanning folder…</p>}
         {!loadingFiles && sortedFiles.length === 0 && (
