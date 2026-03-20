@@ -144,7 +144,13 @@ export default function Watchlist({ animeList, settings, onSearchRequest }: Prop
   const sorted = useMemo(() => {
     const copy = [...filtered];
     switch (sortMode) {
-      case "alpha":    return copy.sort((a, b) => a.title_romaji.localeCompare(b.title_romaji));
+      case "alpha": return copy.sort((a, b) => {
+        const getT = (x: Anime) =>
+          settings?.language === "english" ? (x.title_english || x.title_romaji) :
+          settings?.language === "native"  ? (x.title_native  || x.title_romaji) :
+          x.title_romaji;
+        return getT(a).toLowerCase().localeCompare(getT(b).toLowerCase());
+      });
       case "score":    return copy.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
       case "progress": return copy.sort((a, b) => {
         const ap = a.total_episodes ? a.progress / a.total_episodes : 0;
@@ -164,7 +170,13 @@ export default function Watchlist({ animeList, settings, onSearchRequest }: Prop
       map.get(label)!.push(a);
     }
     for (const [, items] of map) {
-      items.sort((a, b) => a.title_romaji.localeCompare(b.title_romaji));
+      items.sort((a, b) => {
+        const getT = (x: Anime) =>
+          settings?.language === "english" ? (x.title_english || x.title_romaji) :
+          settings?.language === "native"  ? (x.title_native  || x.title_romaji) :
+          x.title_romaji;
+        return getT(a).toLowerCase().localeCompare(getT(b).toLowerCase());
+      });
     }
     return Array.from(map.entries());
   }, [sorted, sortMode]);
@@ -326,6 +338,7 @@ export default function Watchlist({ animeList, settings, onSearchRequest }: Prop
                             onClick={() => setSelectedAnime(prev => prev?.id === a.id ? null : a)}
                             onContextMenu={e => handleContextMenu(e, a)}
                             onUpdate={handleAnimeUpdate}
+                            language={settings?.language}
                           />
                         ))}
                       </div>

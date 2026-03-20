@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Star, Plus, Minus } from "lucide-react";
-import type { Anime } from "../types/anime";
+import type { Anime, AppSettings } from "../types/anime";
 import { api } from "../api";
 
 interface Props {
@@ -11,6 +11,7 @@ interface Props {
   onClick: () => void;
   onContextMenu: (e: React.MouseEvent) => void;
   onUpdate: (updated: Partial<Anime> & { id: number }) => void;
+  language?: "romaji" | "english" | "native";
 }
 
 function proxyUrl(url: string | null): string | null {
@@ -20,7 +21,7 @@ function proxyUrl(url: string | null): string | null {
 
 export default function SeriesCard({
   anime, isSelected, isNowPlaying, nowPlayingEpisode,
-  onClick, onContextMenu, onUpdate,
+  onClick, onContextMenu, onUpdate, language = "romaji",
 }: Props) {
   const [imgError, setImgError] = useState(false);
   const [updating, setUpdating] = useState(false);
@@ -28,7 +29,10 @@ export default function SeriesCard({
   const pct = anime.total_episodes
     ? Math.min(100, Math.round((anime.progress / anime.total_episodes) * 100))
     : 0;
-  const title = anime.title_english || anime.title_romaji;
+  const title =
+    language === "english" ? (anime.title_english || anime.title_romaji) :
+    language === "native"  ? (anime.title_native  || anime.title_romaji) :
+    anime.title_romaji;
 
   const changeProgress = async (e: React.MouseEvent, delta: number) => {
     e.stopPropagation();

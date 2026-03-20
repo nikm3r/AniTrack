@@ -38,6 +38,9 @@ export default function SeriesDetail({ anime, settings, onClose, onUpdate, onCon
   const [expanded, setExpanded] = useState(false);
   const [imgError, setImgError] = useState(false);
   const [folderExists, setFolderExists] = useState<boolean | null>(null);
+  const [editingScore, setEditingScore] = useState(false);
+  const [scoreInput, setScoreInput] = useState(String(anime.score ?? ""));
+  const [savingScore, setSavingScore] = useState(false);
 
   // Reset state when anime changes
   useEffect(() => {
@@ -45,6 +48,8 @@ export default function SeriesDetail({ anime, settings, onClose, onUpdate, onCon
     setEditingProgress(false);
     setImgError(false);
     setExpanded(false);
+    setScoreInput(String(anime.score ?? ""));
+    setEditingScore(false);
   }, [anime.id]);
 
   // Check folder existence
@@ -107,11 +112,31 @@ export default function SeriesDetail({ anime, settings, onClose, onUpdate, onCon
     }
   };
 
+  const handleScoreSave = async () => {
+    const val = parseFloat(scoreInput);
+    if (isNaN(val) || val < 0 || val > 10) return;
+    const rounded = Math.round(val * 10) / 10;
+    setSavingScore(true);
+    try {
+      await api.patch(`/api/anime/${anime.id}`, { score: rounded });
+      // Also push to AniList
+      await api.patch(`/api/anime/${anime.id}/score`, { score: rounded });
+      onUpdate({ id: anime.id, score: rounded });
+      setScoreInput(String(rounded));
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setSavingScore(false);
+      setEditingScore(false);
+    }
+  };
+
   const openFolder = async () => {
     try {
       const res = await api.post<{ path: string }>("/api/files/resolve-path", {
         title_romaji: anime.title_romaji,
       });
+      // Open folder via Electron shell if available
       if ((window as any).electronAPI?.showItemInFolder) {
         (window as any).electronAPI.showItemInFolder(res.path);
       } else if ((window as any).electronAPI?.openExternal) {
@@ -192,13 +217,37 @@ export default function SeriesDetail({ anime, settings, onClose, onUpdate, onCon
               {anime.total_episodes ? `/${anime.total_episodes}` : ""}
             </p>
           </div>
-          <div className="bg-white/5 rounded-xl p-2.5 text-center">
+          <div
+            className="bg-white/5 rounded-xl p-2.5 text-center cursor-pointer hover:bg-white/10 transition-colors relative group"
+            onClick={() => { setEditingScore(true); setScoreInput(String(anime.score ?? "")); }}
+            title="Click to edit score"
+          >
             <p className="text-[10px] text-zinc-600 uppercase tracking-widest mb-0.5">My Score</p>
-            <p className="text-sm font-bold text-amber-400 flex items-center justify-center gap-1">
-              {anime.score ? (
-                <><Star className="w-3 h-3 fill-current" />{anime.score}</>
-              ) : "—"}
-            </p>
+            {editingScore ? (
+              <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
+                <input
+                  type="number" min={0} max={10} step={0.5}
+                  value={scoreInput}
+                  onChange={e => setScoreInput(e.target.value)}
+                  className="w-12 bg-black/60 border border-emerald-500/60 rounded px-1 py-0.5 text-xs text-zinc-100 text-center focus:outline-none"
+                  autoFocus
+                  onKeyDown={e => {
+                    if (e.key === "Enter") handleScoreSave();
+                    if (e.key === "Escape") setEditingScore(false);
+                  }}
+                />
+                <button onClick={handleScoreSave} disabled={savingScore}
+                  className="text-emerald-400 hover:text-emerald-300 text-xs">
+                  {savingScore ? "…" : "✓"}
+                </button>
+              </div>
+            ) : (
+              <p className="text-sm font-bold text-amber-400 flex items-center justify-center gap-1">
+                {anime.score ? (
+                  <><Star className="w-3 h-3 fill-current" />{anime.score}</>
+                ) : <span className="text-zinc-600 text-xs">tap to rate</span>}
+              </p>
+            )}
           </div>
           <div className="bg-white/5 rounded-xl p-2.5 text-center">
             <p className="text-[10px] text-zinc-600 uppercase tracking-widest mb-0.5">Avg</p>

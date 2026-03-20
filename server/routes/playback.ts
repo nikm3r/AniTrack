@@ -113,11 +113,10 @@ function findPlayer(): { exe: string; args: (filePath: string, forSync: boolean)
       : { exe: customPath, args: mpvArgs, type: "mpv" };
   }
 
-  // Build Windows paths using APPDATA/ProgramFiles env vars if available
-  const pf = process.env["ProgramFiles"] || "C:\\Program Files";
-  const pf86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
+  const pf  = process.env["ProgramFiles"]       || "C:\\Program Files";
+  const pf86 = process.env["ProgramFiles(x86)"]  || "C:\\Program Files (x86)";
   const localAppData = process.env["LOCALAPPDATA"] || "";
-  const appData = process.env["APPDATA"] || "";
+  const userProfile  = process.env["USERPROFILE"]  || "C:\\Users\\User";
 
   const mpvCandidates = [
     "mpv",
@@ -128,8 +127,7 @@ function findPlayer(): { exe: string; args: (filePath: string, forSync: boolean)
     `${pf}\\mpv\\mpv.exe`,
     `${pf86}\\mpv\\mpv.exe`,
     `${localAppData}\\mpv\\mpv.exe`,
-    // Scoop install
-    `${process.env["USERPROFILE"] || "C:\\Users\\User"}\\scoop\\apps\\mpv\\current\\mpv.exe`,
+    `${userProfile}\\scoop\\apps\\mpv\\current\\mpv.exe`,
   ].filter(Boolean);
 
   const vlcCandidates = [
@@ -139,8 +137,6 @@ function findPlayer(): { exe: string; args: (filePath: string, forSync: boolean)
     "/Applications/VLC.app/Contents/MacOS/VLC",
     `${pf}\\VideoLAN\\VLC\\vlc.exe`,
     `${pf86}\\VideoLAN\\VLC\\vlc.exe`,
-    // Portable VLC — check next to exe and common locations
-    `${appData}\\VLC\\vlc.exe`,
   ].filter(Boolean);
 
   const ordered = playerMode === "vlc"

@@ -1,13 +1,14 @@
 import React, { useState, useCallback } from "react";
-import { Monitor, Search, Users, Settings as SettingsIcon, Tv } from "lucide-react";
+import { Monitor, Search, Users, Settings as SettingsIcon, Tv, Compass } from "lucide-react";
 import { Settings } from "./Settings";
 import { useSettings } from "../hooks/useSettings";
 import { useAnimeList } from "../hooks/useAnimeList";
 import Watchlist from "./Watchlist";
 import TorrentSearch from "./TorrentSearch";
 import SyncWatch from "./SyncWatch";
+import Browse from "./Browse";
 
-type Tab = "watchlist" | "search" | "sync" | "settings";
+type Tab = "watchlist" | "search" | "browse" | "sync" | "settings";
 
 function NavItem({ active, icon, label, onClick }: {
   active: boolean; icon: React.ReactNode; label: string; onClick: () => void;
@@ -53,6 +54,7 @@ export default function App() {
         <div className="flex flex-col items-center gap-2 flex-1 no-drag">
           <NavItem active={activeTab === "watchlist"} icon={<Monitor className="w-5 h-5" />} label="Watchlist"       onClick={() => setActiveTab("watchlist")} />
           <NavItem active={activeTab === "search"}    icon={<Search className="w-5 h-5" />}  label="Search Torrents" onClick={() => setActiveTab("search")} />
+          <NavItem active={activeTab === "browse"}    icon={<Compass className="w-5 h-5" />} label="Browse"           onClick={() => setActiveTab("browse")} />
           <NavItem active={activeTab === "sync"}      icon={<Users className="w-5 h-5" />}   label="Sync Watch"      onClick={() => setActiveTab("sync")} />
         </div>
 
@@ -88,6 +90,16 @@ export default function App() {
             <SyncWatch
               anime={animeList.anime}
               settings={settings}
+            />
+          </div>
+
+          {/* Browse — always mounted */}
+          <div className={`flex-1 min-h-0 flex flex-col ${activeTab === "browse" ? "" : "hidden"}`}>
+            <Browse
+              animeList={animeList.anime}
+              settings={settings}
+              onAnimeAdded={(anime) => animeList.addAnime(anime)}
+              onAnimeRemoved={(id) => animeList.removeAnime(id)}
             />
           </div>
 

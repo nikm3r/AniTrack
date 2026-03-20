@@ -312,4 +312,85 @@ export class AniListTracker implements ITracker {
     console.log(`[anilist] Updated progress for media ${mediaId}: ep ${progress} (${anilistStatus})`);
   }
 
+
+  async getSeasonAnime(season: string, year: number): Promise<any[]> {
+    const Q = `
+      query ($season: MediaSeason, $year: Int, $page: Int) {
+        Page(page: $page, perPage: 50) {
+          media(season: $season, seasonYear: $year, type: ANIME, sort: POPULARITY_DESC) {
+            id
+            title { romaji english }
+            coverImage { large }
+            bannerImage
+            format
+            status
+            season
+            seasonYear
+            episodes
+            averageScore
+            genres
+            description(asHtml: false)
+          }
+        }
+      }
+    `;
+
+    type Media = {
+      id: number;
+      title: { romaji: string; english: string | null };
+      coverImage: { large: string } | null;
+      bannerImage: string | null;
+      format: string | null;
+      status: string | null;
+      season: string | null;
+      seasonYear: number | null;
+      episodes: number | null;
+      averageScore: number | null;
+      genres: string[];
+      description: string | null;
+    };
+
+    // Fetch up to 3 pages (150 anime per season is plenty)
+    const allMedia: Media[] = [];
+    for (let page = 1; page <= 3; page++) {
+      const data = await gql<{ Page: { media: Media[] } }>(Q, { season, year, page });
+      const media = data.Page.media;
+      allMedia.push(...media);
+      if (media.length < 50) break;
+    }
+
+    return allMedia.map(m => ({
+      id: m.id,
+      title_romaji: m.title.romaji,
+      title_english: m.title.english,
+      cover_image: m.coverImage?.large ?? null,
+      banner_image: m.bannerImage ?? null,
+      format: m.format,
+      status: m.status,
+      season: m.season,
+      season_year: m.seasonYear,
+      total_episodes: m.episodes,
+      average_score: m.averageScore,
+      genres: m.genres ?? [],
+      description: m.description ?? null,
+    }));
+  }
+
+  async updateScore(token: string, mediaId: string, score: number): Promise<void> {
+    // Send score as-is — AniList accepts the value in whatever format the user has set
+    const mutation = `
+      mutation ($mediaId: Int, $score: Float) {
+        SaveMediaListEntry(mediaId: $mediaId, score: $score) {
+          id
+          score
+        }
+      }
+    `;
+    await gql(mutation, {
+      mediaId: parseInt(mediaId, 10),
+      score,
+    }, token);
+    console.log(`[anilist] Updated score for media ${mediaId}: ${score}`);
+  }
+
 }

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
   Play, Users, Search, Tag, FileEdit, SlidersHorizontal, ChevronRight,
-  MonitorPlay, CheckCircle, PauseCircle, XCircle, BookmarkPlus, Check, X,
+  MonitorPlay, CheckCircle, PauseCircle, XCircle, BookmarkPlus, Check, X, Trash2,
 } from "lucide-react";
 import { api } from "../api";
 import type { Anime, AnimeStatus } from "../types/anime";
@@ -12,6 +12,7 @@ interface Props {
   anime: Anime;
   onClose: () => void;
   onUpdate: (updated: Partial<Anime> & { id: number }) => void;
+  onRemove?: (id: number) => void;
   settings?: any;
 }
 
@@ -36,7 +37,6 @@ function epLabel(n: number): string {
 
 function guessEpisode(filename: string, totalEpisodes?: number | null): number | null {
   const base = filename.split("/").pop()?.split("\\").pop() || filename;
-  // Strip extension and hex hashes like [E44435E5]
   const clean = base.replace(/\.[^.]+$/, "").replace(/\[[0-9A-Fa-f]{6,8}\]/g, "").trim();
 
   const tryN = (n: number): number | null => {
@@ -46,26 +46,19 @@ function guessEpisode(filename: string, totalEpisodes?: number | null): number |
   };
 
   const patterns: RegExp[] = [
-    // S01E03, S1E3, s01e03
-    /[Ss]\d{1,2}[Ee](\d{1,3})/,
-    // Season 1 Episode 3, Season 01 Episode 03
-    /[Ss]eason\s*\d+\s*[Ee]pisode\s*(\d{1,3})/i,
-    // Episode 03, Ep 03, EP03
-    /[Ee]pisode\s*(\d{1,3})/i,
-    /[Ee]p?\.?\s*(\d{1,3})(?!\d)/,
-    // " - 03 " style (group releases)
-    / - (\d{2,3})[\s\[.(]/,
-    // _03_ or _03.
-    /[_ ](\d{2,3})[_\[. ]/,
-    // Trailing bare number: "Show Name 03" or "Show Name - 03"
-    /(?:^|[\s_\-])0*(\d{1,3})\s*$/,
+    /[Ss]\d{1,2}[Ee](\d{1,3})/,                    // S01E03
+    /[Ss]eason\s*\d+\s*[Ee]pisode\s*(\d{1,3})/i, // Season 1 Episode 3
+    /[Ee]pisode\s*(\d{1,3})/i,                       // Episode 03
+    /[Ee]p?\.?\s*(\d{1,3})(?!\d)/,                 // EP03, Ep 3
+    / - (\d{2,3})[\s\[.(]/,                         // " - 03 "
+    /[_ ](\d{2,3})[_\[. ]/,                          // _03_
+    /(?:^|[\s_\-])0*(\d{1,3})\s*$/,                // trailing bare number
   ];
 
   for (const re of patterns) {
     const m = clean.match(re);
     if (m) {
-      const n = parseInt(m[1], 10);
-      const result = tryN(n);
+      const result = tryN(parseInt(m[1], 10));
       if (result !== null) return result;
     }
   }
@@ -90,7 +83,7 @@ function saveFilters(animeId: number, filters: Filters, titleRomaji: string) {
   localStorage.setItem(filterKey(titleRomaji), JSON.stringify(filters));
 }
 
-export default function ContextMenu({ x, y, anime, onClose, onUpdate, onSearchRequest, settings }: Props) {
+export default function ContextMenu({ x, y, anime, onClose, onUpdate, onRemove, onSearchRequest, settings }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [hoveredItem, setHoveredItem] = useState<string | null>(null);
@@ -177,6 +170,17 @@ export default function ContextMenu({ x, y, anime, onClose, onUpdate, onSearchRe
         await api.patch(`/api/anime/${anime.id}`, updates);
         onUpdate({ id: anime.id, ...updates });
       } catch (e) { console.error(e); }
+    }
+    onClose();
+  };
+
+  const handleRemove = async () => {
+    if (!confirm(`Remove "${anime.title_romaji}" from library? This cannot be undone.`)) return;
+    try {
+      await api.delete(`/api/anime/${anime.id}`);
+      onRemove?.(anime.id);
+    } catch (e) {
+      console.error(e);
     }
     onClose();
   };
@@ -371,6 +375,14 @@ export default function ContextMenu({ x, y, anime, onClose, onUpdate, onSearchRe
           </button>
           {hoveredItem === "status" && <StatusFlyout />}
         </div>
+
+        {/* Remove from Library */}
+        <div className="h-px bg-white/5 mx-3 my-1" />
+        <button onClick={handleRemove}
+          className="flex items-center gap-2.5 w-full px-4 py-2.5 text-left text-sm text-red-400 hover:bg-red-500/10 hover:text-red-300 transition-colors">
+          <Trash2 className="w-3.5 h-3.5" />
+          <span className="flex-1">Remove from Library</span>
+        </button>
 
         {/* Edit Settings */}
         <button onClick={() => setShowFilters(true)}

@@ -235,6 +235,40 @@ router.delete("/:id", (req: Request, res: Response) => {
   res.status(204).send();
 });
 
+
+// ─── PATCH /api/anime/:id/score ──────────────────────────────────────────────
+
+router.patch("/:id/score", async (req: Request, res: Response) => {
+  const db = getDb();
+  const id = parseInt(req.params.id, 10);
+  const { score } = req.body;
+
+  if (typeof score !== "number" || score < 0 || score > 10) {
+    res.status(400).json({ error: "score must be a number between 0 and 10" });
+    return;
+  }
+
+  const anime = db.prepare("SELECT * FROM anime WHERE id = ?").get(id) as any;
+  if (!anime) { res.status(404).json({ error: "Not found" }); return; }
+
+  // Update local DB
+  db.prepare("UPDATE anime SET score = ?, updated_at = datetime('now') WHERE id = ?").run(score, id);
+
+  // Push to AniList in background
+  if (anime.anilist_id) {
+    const tokenRow = db.prepare("SELECT value FROM settings WHERE key = 'anilist_token'").get() as { value: string } | undefined;
+    if (tokenRow?.value) {
+      const { AniListTracker } = await import("../tracker/anilist.js");
+      const tracker = new AniListTracker();
+      tracker.updateScore(tokenRow.value, String(anime.anilist_id), score)
+        .then(() => console.log(`[anime] Score synced to AniList: ${anime.title_romaji} -> ${score}`))
+        .catch(e => console.error("[anime] AniList score sync failed:", e));
+    }
+  }
+
+  res.json({ ok: true, score });
+});
+
 // ─── PATCH /api/anime/:id/progress ───────────────────────────────────────────
 
 router.patch("/:id/progress", (req: Request, res: Response) => {
@@ -291,7 +325,7 @@ router.patch("/:id/progress", (req: Request, res: Response) => {
       const tracker = new AniListTracker();
       tracker
         .updateProgress(tokenRow.value, String(updated.anilist_id), updated.progress, updated.status)
-        .then(() => console.log(`[anime] AniList updated: "${updated.title_romaji}" -> ep ${updated.progress}`))
+        .then(() => console.log(`[anime] AniList updated: anime ${updated.anilist_id} -> ep ${updated.progress}`))
         .catch((e) => console.error("[anime] AniList progress update failed:", e));
     }
   }
