@@ -28,21 +28,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: |
-          pacman -Syu --noconfirm
-          pacman -S --noconfirm base-devel curl git
-      - name: Create build user (makepkg refuses to run as root)
+        run: pacman -Syu --noconfirm && pacman -S --noconfirm base-devel curl git sudo
+      - name: Create build user
         run: |
           useradd -m builder
           echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
-          chown -R builder:builder .
-      - name: Build package
+      - name: Build package in temp dir
         run: |
-          su builder -c "makepkg -si --noconfirm"
+          mkdir -p /tmp/arch-build
+          cp PKGBUILD /tmp/arch-build/
+          chown -R builder:builder /tmp/arch-build
+          cd /tmp/arch-build && su builder -c "makepkg -s --noconfirm --skippgpcheck"
       - name: Upload pkg
         uses: softprops/action-gh-release@v1
         with:
-          files: "*.pkg.tar.zst"
+          files: /tmp/arch-build/*.pkg.tar.zst
 
   build-windows:
     runs-on: windows-latest
