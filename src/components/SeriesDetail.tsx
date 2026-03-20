@@ -112,9 +112,10 @@ export default function SeriesDetail({ anime, settings, onClose, onUpdate, onCon
       const res = await api.post<{ path: string }>("/api/files/resolve-path", {
         title_romaji: anime.title_romaji,
       });
-      // Open folder via Electron shell if available
-      if ((window as any).electronAPI?.openPath) {
-        (window as any).electronAPI.openPath(res.path);
+      if ((window as any).electronAPI?.showItemInFolder) {
+        (window as any).electronAPI.showItemInFolder(res.path);
+      } else if ((window as any).electronAPI?.openExternal) {
+        (window as any).electronAPI.openExternal(`file://${res.path}`);
       }
     } catch (e) {
       console.error(e);
