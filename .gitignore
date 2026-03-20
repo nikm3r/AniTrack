@@ -4,3 +4,7 @@ dist/
 dist-server/
 *.asar
 .env
+pkg/
+src/anitrack-linux-x64/
+*.zip
+*.pkg.tar.zst

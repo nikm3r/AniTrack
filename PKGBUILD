@@ -1,6 +1,6 @@
 # Maintainer: nikm3r <nmermigkas@gmail.com>
 pkgname=anitrack
-pkgver=0.3.5
+pkgver=0.3.6
 pkgrel=1
 pkgdesc="Anime tracking desktop app with AniList sync, torrent search and sync watch"
 arch=('x86_64')
@@ -13,10 +13,7 @@ sha256sums=('SKIP')
 
 package() {
   # Find the extracted directory (handles different zip structures)
-  local srcdir_inner="${srcdir}/AniTrack-${pkgver}"
-  if [ ! -d "${srcdir_inner}" ]; then
-    srcdir_inner="${srcdir}"
-  fi
+  local srcdir_inner="${srcdir}/anitrack-linux-x64"
 
   # Install app files
   install -dm755 "${pkgdir}/opt/anitrack"
