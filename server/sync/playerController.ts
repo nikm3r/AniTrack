@@ -1,7 +1,6 @@
 import net from "net";
 import path from "path";
 import fs from "fs";
-import http from "http";
 import os from "os";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -21,7 +20,6 @@ export interface IPlayerController {
 }
 
 // ─── MPV Controller ───────────────────────────────────────────────────────────
-// Communicates via JSON IPC socket (Unix socket on Linux/macOS, named pipe on Windows)
 
 export class MpvController implements IPlayerController {
   private socket: net.Socket | null = null;
@@ -70,14 +68,12 @@ export class MpvController implements IPlayerController {
       this.socket.on("close", () => {
         this.connected = false;
         this.socket = null;
-        // Reject all pending
         for (const { reject } of this.pending.values()) {
           reject(new Error("MPV socket closed"));
         }
         this.pending.clear();
       });
 
-      // Timeout if MPV not ready
       setTimeout(() => {
         if (!this.connected) reject(new Error("MPV connection timeout"));
       }, 3000);
@@ -88,7 +84,6 @@ export class MpvController implements IPlayerController {
     try {
       const msg = JSON.parse(line);
 
-      // Response to a command
       if (msg.request_id !== undefined && this.pending.has(msg.request_id)) {
         const { resolve, reject } = this.pending.get(msg.request_id)!;
         this.pending.delete(msg.request_id);
@@ -100,7 +95,6 @@ export class MpvController implements IPlayerController {
         return;
       }
 
-      // Property change event
       if (msg.event === "property-change") {
         const handler = this.observers.get(msg.name);
         if (handler) handler(msg.data);
@@ -111,7 +105,6 @@ export class MpvController implements IPlayerController {
   }
 
   private _observeProperties() {
-    // Observe time-pos and pause so we always have fresh status
     this._sendRaw({ command: ["observe_property", 1, "time-pos"] });
     this._sendRaw({ command: ["observe_property", 2, "pause"] });
     this._sendRaw({ command: ["observe_property", 3, "filename"] });
@@ -119,7 +112,7 @@ export class MpvController implements IPlayerController {
     this.observers.set("time-pos", (val) => {
       if (val !== null && val !== undefined) {
         this._status.position = val;
-        this._lastUpdate = Date.now();
+        this._lastUpdate = Date.now(); // ← was already correct in MPV
       }
     });
     this.observers.set("pause", (val) => {
@@ -162,7 +155,6 @@ export class MpvController implements IPlayerController {
 
   async getStatus(): Promise<PlayerStatus | null> {
     if (!this.connected) return null;
-    // If we haven't received any time-pos update, player hasn't started playing yet
     if (this._lastUpdate === 0) return null;
     return { ...this._status };
   }
@@ -183,15 +175,18 @@ export class MpvController implements IPlayerController {
 }
 
 // ─── VLC Controller ───────────────────────────────────────────────────────────
-// Communicates via the syncplay.lua TCP interface injected into VLC
+// Communicates via the syncplay.lua TCP interface.
+// The lua script responds to "." with:
+//   playstate: playing\nposition: 12.5\n   (and optionally other lines)
+// Commands: set-position: <secs>\n  set-playstate: playing\n  set-rate: <rate>\n
 
 export class VlcController implements IPlayerController {
   private socket: net.Socket | null = null;
   private connected = false;
   private buffer = "";
   private _status: PlayerStatus = { position: 0, paused: true, filename: null };
-  private _lastUpdate = 0;
-  private pendingLines: Array<(line: string) => void> = [];
+  private _lastUpdate = 0;        // FIX: was never set before
+  private _pollTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private port: number) {}
 
@@ -201,9 +196,8 @@ export class VlcController implements IPlayerController {
 
       this.socket.on("connect", () => {
         this.connected = true;
-        resolve();
-        // Start polling
         this._startPolling();
+        resolve();
       });
 
       this.socket.on("data", (data) => {
@@ -212,8 +206,7 @@ export class VlcController implements IPlayerController {
         this.buffer = lines.pop() || "";
         for (const line of lines) {
           const trimmed = line.trim();
-          if (!trimmed) continue;
-          this._handleLine(trimmed);
+          if (trimmed) this._handleLine(trimmed);
         }
       });
 
@@ -225,6 +218,7 @@ export class VlcController implements IPlayerController {
       this.socket.on("close", () => {
         this.connected = false;
         this.socket = null;
+        this._stopPolling();
       });
 
       setTimeout(() => {
@@ -234,22 +228,30 @@ export class VlcController implements IPlayerController {
   }
 
   private _handleLine(line: string) {
-    // Parse syncplay.lua responses
-    if (line.startsWith("position: ")) {
-      const val = parseFloat(line.replace("position: ", "").replace(",", "."));
-      if (!isNaN(val)) this._status.position = val;
-    } else if (line.startsWith("playstate: ")) {
-      const state = line.replace("playstate: ", "").trim();
-      if (state !== "no-input") this._status.paused = state !== "playing";
-    } else if (line.startsWith("filename: ")) {
-      this._status.filename = line.replace("filename: ", "").trim() || null;
+    // The lua script responds to "." with lines like:
+    //   playstate: playing
+    //   position: 12.345
+    //   filename: somefile.mkv   (from filepath-change-notification)
+    if (line.startsWith("playstate: ")) {
+      const state = line.slice("playstate: ".length).trim();
+      if (state !== "no-input") {
+        this._status.paused = state !== "playing";
+        this._lastUpdate = Date.now(); // FIX: update timestamp so getStatus() works
+      }
+    } else if (line.startsWith("position: ")) {
+      const raw = line.slice("position: ".length).trim().replace(",", ".");
+      const val = parseFloat(raw);
+      if (!isNaN(val) && raw !== "no-input") {
+        // The lua multiplies position by titlemultiplier (604800) for multi-title sources.
+        // For normal video files title=0, so position is just the real seconds.
+        this._status.position = val % 604800;
+        this._lastUpdate = Date.now(); // FIX: update timestamp
+      }
+    } else if (line.startsWith("filepath: ") || line.startsWith("filename: ")) {
+      const val = line.split(": ").slice(1).join(": ").trim();
+      this._status.filename = val && val !== "no-input" ? val : null;
     }
-
-    // Resolve any waiting line callbacks
-    if (this.pendingLines.length > 0) {
-      const cb = this.pendingLines.shift()!;
-      cb(line);
-    }
+    // Ignore: duration-change, inputstate-change, filepath-change-notification
   }
 
   private _send(cmd: string): void {
@@ -260,12 +262,18 @@ export class VlcController implements IPlayerController {
   }
 
   private _startPolling() {
-    const poll = () => {
+    // Send "." every 200ms — lua replies with playstate + position
+    this._pollTimer = setInterval(() => {
       if (!this.connected) return;
       this._send(".");
-      setTimeout(poll, 200);
-    };
-    poll();
+    }, 200);
+  }
+
+  private _stopPolling() {
+    if (this._pollTimer) {
+      clearInterval(this._pollTimer);
+      this._pollTimer = null;
+    }
   }
 
   isConnected(): boolean {
@@ -274,13 +282,13 @@ export class VlcController implements IPlayerController {
 
   async getStatus(): Promise<PlayerStatus | null> {
     if (!this.connected) return null;
-    // If we haven't received any time-pos update, player hasn't started playing yet
+    // FIX: now _lastUpdate is actually set, so this check works
     if (this._lastUpdate === 0) return null;
     return { ...this._status };
   }
 
   async seek(seconds: number): Promise<void> {
-    // syncplay.lua uses "set-position: <seconds>"
+    // Use set-position (absolute seek via set_time in lua)
     this._send(`set-position: ${seconds}`);
   }
 
@@ -288,7 +296,12 @@ export class VlcController implements IPlayerController {
     this._send(`set-playstate: ${paused ? "paused" : "playing"}`);
   }
 
+  async setRate(rate: number): Promise<void> {
+    this._send(`set-rate: ${rate}`);
+  }
+
   disconnect(): void {
+    this._stopPolling();
     this.connected = false;
     try { this.socket?.destroy(); } catch {}
     this.socket = null;
@@ -304,7 +317,7 @@ let vlcPort: number | null = null;
 export function setActivePlayer(type: "mpv" | "vlc", port?: number) {
   activePlayerType = type;
   if (type === "vlc" && port) vlcPort = port;
-  activeController = null; // Will reconnect on next getController call
+  activeController = null;
 }
 
 export function clearActivePlayer() {
@@ -341,7 +354,6 @@ export async function getController(): Promise<IPlayerController | null> {
 }
 
 // ─── VLC lua intf setup ───────────────────────────────────────────────────────
-// Copies syncplay.lua to VLC's lua intf directory so VLC can load it
 
 export function getVlcIntfPaths(): { intfPath: string; userPath: string } | null {
   const home = os.homedir();
@@ -376,7 +388,6 @@ export function installVlcLua(resourcesPath: string, vlcExePath?: string): boole
     return false;
   }
 
-  // For portable VLC, install next to the executable
   if (vlcExePath && vlcExePath.toLowerCase().includes("portable")) {
     const portableIntf = path.join(path.dirname(vlcExePath), "App", "vlc", "lua", "intf");
     try {

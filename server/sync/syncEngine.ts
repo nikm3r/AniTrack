@@ -1,71 +1,77 @@
 /**
  * SyncEngine — server-side sync logic for AniTrack
  *
- * Architecture mirrors Syncplay exactly:
- * - Connects directly to MPV via IPC socket (push-based via observe_property)
- * - Connects directly to the hub via socket.io
- * - All sync decisions happen here, in the server process
- * - React UI is just a viewer — no sync logic in the frontend
+ * Architecture mirrors Syncplay:
+ * - Connects to the hub via socket.io
+ * - Controls the local player via IPlayerController (MPV or VLC — player-agnostic)
+ * - All sync decisions happen here
+ * - React UI is a viewer only
  *
  * Data flow:
- *   MPV (observe_property) → SyncEngine → hub (state event)
- *   hub (state event) → SyncEngine → MPV (seek/pause via IPC)
+ *   Player (polled/push) → SyncEngine → hub (state event)
+ *   hub (state event)    → SyncEngine → Player (seek/pause via controller)
  */
 
 import { io as ioClient, Socket } from "socket.io-client";
-import net from "net";
-import path from "path";
-import os from "os";
+import { getController, type IPlayerController } from "./playerController.js";
 
-// ─── Constants (mirrors Syncplay) ─────────────────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────────────────
 
-const SEEK_THRESHOLD = 1.0;         // s — diff must exceed this to trigger a seek
-const REWIND_THRESHOLD = 4.0;       // s — we are this far ahead → hard rewind
-const SLOWDOWN_THRESHOLD = 1.5;     // s — we are this far ahead → slow down
-const SLOWDOWN_RESET = 0.1;         // s — back in sync threshold
-const SLOWDOWN_RATE = 0.95;         // playback rate when slowing down
-const HEARTBEAT_INTERVAL = 2000;    // ms — send position to hub every 2s
-const RECONNECT_DELAY = 2000;       // ms — wait before reconnecting MPV
+const SEEK_THRESHOLD      = 1.0;   // s — diff must exceed this to trigger a seek
+const REWIND_THRESHOLD    = 4.0;   // s — we are this far ahead → hard rewind
+const SLOWDOWN_THRESHOLD  = 1.5;   // s — we are this far ahead → slow down
+const SLOWDOWN_RESET      = 0.1;   // s — back in sync threshold
+const SLOWDOWN_RATE       = 0.95;  // playback rate when slowing down
+const HEARTBEAT_INTERVAL  = 2000;  // ms — send position to hub every 2s
+const PLAYER_POLL_INTERVAL = 150;  // ms — poll player for state changes
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface PlayerState {
   position: number;
   paused: boolean;
-  updatedAt: number; // Date.now()
+  updatedAt: number;
 }
 
 interface GlobalState {
   position: number;
   paused: boolean;
-  updatedAt: number; // Date.now()
+  updatedAt: number;
   setBy: string | null;
+}
+
+export interface SyncStatus {
+  active: boolean;
+  playerConnected: boolean;  // renamed from mpvConnected — player-agnostic
+  hubConnected: boolean;
+  playerPosition: number;
+  playerPaused: boolean;
+  globalPosition: number;
+  globalPaused: boolean;
+  drift: number;
+  synced: boolean;
 }
 
 // ─── SyncEngine ───────────────────────────────────────────────────────────────
 
 export class SyncEngine {
-  // MPV IPC
-  private mpvSocket: net.Socket | null = null;
-  private mpvBuffer = "";
-  private mpvRequestId = 1;
-  private mpvPending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
-  private mpvConnected = false;
-  private mpvReconnectTimer: NodeJS.Timeout | null = null;
-
   // Hub socket
   private hubSocket: Socket | null = null;
   private hubConnected = false;
 
-  // State
+  // Player state (updated via polling)
   private player: PlayerState = { position: 0, paused: true, updatedAt: 0 };
   private global: GlobalState = { position: 0, paused: true, updatedAt: 0, setBy: null };
   private lastSentState: { position: number; paused: boolean } | null = null;
-  private ignoring = 0; // clientIgnoringOnTheFly counter
+  private lastPlayerPosition: number = 0;  // to detect user seeks
+
   private heartbeatTimer: NodeJS.Timeout | null = null;
+  private pollTimer: NodeJS.Timeout | null = null;
   private speedSlowed = false;
-  private suppressNextPauseEvent = false; // set when WE command a pause — suppress echo
-  private suppressNextSeekEvent = false;  // set when WE command a seek — suppress echo
+
+  // Suppress flags — prevent echo when WE command the player
+  private suppressNextPauseEvent = false;
+  private suppressNextSeekEvent = false;
 
   // Config
   private username = "Guest";
@@ -73,12 +79,11 @@ export class SyncEngine {
   private hubUrl = "https://anitrack-hub.onrender.com";
   private active = false;
 
-  // Status callback for UI
   private onStatus: ((status: SyncStatus) => void) | null = null;
 
   constructor() {}
 
-  // ── Public API ──────────────────────────────────────────────────────────────
+  // ── Public API ───────────────────────────────────────────────────────────────
 
   join(username: string, roomId: string, hubUrl: string, onStatus?: (s: SyncStatus) => void) {
     this.username = username;
@@ -87,8 +92,8 @@ export class SyncEngine {
     this.onStatus = onStatus || null;
     this.active = true;
 
-    this._connectMpv();
     this._connectHub();
+    this._startPlayerPoll();
     this._startHeartbeat();
 
     console.log(`[sync] Joined room "${roomId}" as "${username}"`);
@@ -97,17 +102,14 @@ export class SyncEngine {
   leave() {
     this.active = false;
     this._stopHeartbeat();
+    this._stopPlayerPoll();
     this.hubSocket?.emit("leave-room", { roomId: this.roomId, username: this.username });
     this.hubSocket?.disconnect();
     this.hubSocket = null;
-    this.mpvSocket?.destroy();
-    this.mpvSocket = null;
-    if (this.mpvReconnectTimer) clearTimeout(this.mpvReconnectTimer);
     console.log(`[sync] Left room "${this.roomId}"`);
   }
 
   isActive(): boolean { return this.active; }
-  isMpvConnected(): boolean { return this.mpvConnected; }
   isHubConnected(): boolean { return this.hubConnected; }
 
   getRoomId(): string { return this.roomId; }
@@ -119,7 +121,7 @@ export class SyncEngine {
     const diff = Math.abs(playerPos - globalPos);
     return {
       active: this.active,
-      mpvConnected: this.mpvConnected,
+      playerConnected: this.player.updatedAt > 0,
       hubConnected: this.hubConnected,
       playerPosition: playerPos,
       playerPaused: this.player.paused,
@@ -130,163 +132,73 @@ export class SyncEngine {
     };
   }
 
-  // ── MPV connection ──────────────────────────────────────────────────────────
+  // ── Player polling ───────────────────────────────────────────────────────────
+  // Instead of MPV-specific IPC observe_property, we poll via getController()
+  // which works for both MPV and VLC.
 
-  private _getMpvSocketPath(): string {
-    if (process.platform === "win32") return "\\\\.\\pipe\\anitrack-mpv-sync";
-    return path.join(os.tmpdir(), "anitrack-mpv.sock");
+  private _startPlayerPoll() {
+    this._stopPlayerPoll();
+    this.pollTimer = setInterval(() => this._pollPlayer(), PLAYER_POLL_INTERVAL);
   }
 
-  private _connectMpv() {
+  private _stopPlayerPoll() {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+  }
+
+  private async _pollPlayer() {
     if (!this.active) return;
 
-    const sock = net.createConnection(this._getMpvSocketPath());
-    this.mpvSocket = sock;
+    const ctrl = await getController();
+    if (!ctrl) return;
 
-    sock.on("connect", () => {
-      this.mpvConnected = true;
-      console.log("[sync] MPV connected");
-      // Observe pause and time-pos — push events, no polling needed
-      this._mpvSendRaw({ command: ["observe_property", 1, "time-pos"] });
-      this._mpvSendRaw({ command: ["observe_property", 2, "pause"] });
-      this._emitStatus();
-    });
-
-    sock.on("data", (data) => {
-      this.mpvBuffer += data.toString();
-      const lines = this.mpvBuffer.split("\n");
-      this.mpvBuffer = lines.pop() || "";
-      for (const line of lines) {
-        const t = line.trim();
-        if (t) this._handleMpvLine(t);
-      }
-    });
-
-    sock.on("error", () => {
-      this.mpvConnected = false;
-      this._emitStatus();
-    });
-
-    sock.on("close", () => {
-      this.mpvConnected = false;
-      this.mpvSocket = null;
-      this._emitStatus();
-      // Reconnect after delay
-      if (this.active) {
-        this.mpvReconnectTimer = setTimeout(() => this._connectMpv(), RECONNECT_DELAY);
-      }
-    });
-  }
-
-  private _handleMpvLine(line: string) {
     try {
-      const msg = JSON.parse(line);
+      const status = await ctrl.getStatus();
+      if (!status) return;
 
-      // Command response
-      if (msg.request_id !== undefined && this.mpvPending.has(msg.request_id)) {
-        const { resolve, reject } = this.mpvPending.get(msg.request_id)!;
-        this.mpvPending.delete(msg.request_id);
-        msg.error === "success" ? resolve(msg.data) : reject(new Error(msg.error));
+      const now = Date.now();
+      const prevPaused = this.player.paused;
+      const prevPosition = this.player.position;
+
+      this.player.position = status.position;
+      this.player.paused = status.paused;
+      this.player.updatedAt = now;
+
+      // Detect user seek: position jumped unexpectedly
+      if (this.suppressNextSeekEvent) {
+        // We commanded this seek — ignore
+        this.suppressNextSeekEvent = false;
+        this.lastPlayerPosition = status.position;
         return;
       }
 
-      // Property change — this is the core push event from MPV
-      if (msg.event === "property-change") {
-        const now = Date.now();
-        if (msg.name === "time-pos" && msg.data !== null && msg.data !== undefined) {
-          if (this.suppressNextSeekEvent) {
-            // We commanded this seek — update position silently, don't echo
-            this.suppressNextSeekEvent = false;
-            this.player.position = msg.data;
-            this.player.updatedAt = now;
-            return;
-          }
-          const oldPos = this.player.position;
-          this.player.position = msg.data;
-          this.player.updatedAt = now;
-          // Detect user seek: position jumped more than SEEK_THRESHOLD from expected
-          const expected = oldPos + (now - (this.player.updatedAt || now)) / 1000;
-          const jumped = Math.abs(msg.data - expected) > 2.0;
-          if (jumped && this.hubConnected) {
-            console.log(`[sync] User seeked to ${msg.data.toFixed(1)}s`);
-            this._sendStateToHub(false);
-          }
-        }
-        if (msg.name === "pause" && msg.data !== null && msg.data !== undefined) {
-          const wasPaused = this.player.paused;
-          this.player.paused = msg.data;
-          this.player.updatedAt = now;
+      const expectedPos = prevPosition + (this.player.paused ? 0 : PLAYER_POLL_INTERVAL / 1000);
+      const jumped = Math.abs(status.position - expectedPos) > 2.0 && this.lastPlayerPosition !== 0;
+      this.lastPlayerPosition = status.position;
 
-          if (this.suppressNextPauseEvent) {
-            // We commanded this pause — don't echo back to hub
-            this.suppressNextPauseEvent = false;
-            return;
-          }
+      if (jumped && this.hubConnected) {
+        console.log(`[sync] User seeked to ${status.position.toFixed(1)}s`);
+        this._sendStateToHub(false);
+        return;
+      }
 
-          // User changed pause state manually — send immediately
-          if (wasPaused !== msg.data) {
-            console.log(`[sync] MPV ${msg.data ? "paused" : "unpaused"} by user at ${this.player.position.toFixed(1)}s`);
-            this._sendStateToHub(false);
-          }
-        }
+      // Detect user pause/unpause
+      if (this.suppressNextPauseEvent) {
+        this.suppressNextPauseEvent = false;
+        return;
+      }
+      if (status.paused !== prevPaused && this.hubConnected) {
+        console.log(`[sync] Player ${status.paused ? "paused" : "unpaused"} by user at ${status.position.toFixed(1)}s`);
+        this._sendStateToHub(false);
       }
     } catch {
-      // Ignore parse errors
+      // Controller may have disconnected — will reconnect on next poll
     }
   }
 
-  private _mpvSendRaw(obj: object) {
-    if (!this.mpvSocket || !this.mpvConnected) return;
-    try {
-      this.mpvSocket.write(JSON.stringify(obj) + "\n");
-    } catch {}
-  }
-
-  private _mpvCommand(args: any[]): Promise<any> {
-    return new Promise((resolve, reject) => {
-      const id = this.mpvRequestId++;
-      this.mpvPending.set(id, { resolve, reject });
-      this._mpvSendRaw({ command: args, request_id: id });
-      setTimeout(() => {
-        if (this.mpvPending.has(id)) {
-          this.mpvPending.delete(id);
-          reject(new Error("MPV command timeout"));
-        }
-      }, 2000);
-    });
-  }
-
-  private async _mpvSeek(seconds: number) {
-    try {
-      this.suppressNextSeekEvent = true; // suppress echo
-      await this._mpvCommand(["set_property", "time-pos", seconds]);
-      this.player.position = seconds;
-      this.player.updatedAt = Date.now();
-    } catch (e) {
-      this.suppressNextSeekEvent = false;
-      console.error("[sync] MPV seek failed:", e);
-    }
-  }
-
-  private async _mpvSetPaused(paused: boolean) {
-    try {
-      this.suppressNextPauseEvent = true; // suppress echo
-      await this._mpvCommand(["set_property", "pause", paused]);
-      this.player.paused = paused;
-      this.player.updatedAt = Date.now();
-    } catch (e) {
-      this.suppressNextPauseEvent = false;
-      console.error("[sync] MPV setPaused failed:", e);
-    }
-  }
-
-  private async _mpvSetSpeed(rate: number) {
-    try {
-      await this._mpvCommand(["set_property", "speed", rate]);
-    } catch {}
-  }
-
-  // ── Hub connection ──────────────────────────────────────────────────────────
+  // ── Hub connection ───────────────────────────────────────────────────────────
 
   private _connectHub() {
     if (!this.active) return;
@@ -314,28 +226,15 @@ export class SyncEngine {
     socket.on("disconnect", () => {
       this.hubConnected = false;
       this._emitStatus();
-      // We lost connection — pause our own player
-      if (this.mpvConnected) {
+      // Pause our player when we lose the hub
+      if (this.player.updatedAt > 0) {
         console.log("[sync] Hub disconnected — pausing player");
-        this._mpvSetPaused(true);
+        this._commandSetPaused(true);
       }
     });
 
-    // ── Core: receive state from another user ────────────────────────────────
+    // Core: receive state from another user
     socket.on("state", ({ position, paused, doSeek, setBy, ignoringOnTheFly }: any) => {
-      // Handle ignoringOnTheFly — mirrors Syncplay protocol exactly
-      if (ignoringOnTheFly) {
-        if (ignoringOnTheFly.server !== undefined) {
-          // Server acknowledged our ignore request — clear our counter
-          this.ignoring = 0;
-        }
-        if (ignoringOnTheFly.client !== undefined) {
-          // Other client wants us to ignore N of their reports
-          // We don't need to do anything — just apply normally
-        }
-      }
-
-      // Update global state
       const now = Date.now();
       const messageAge = 0.05; // ~50ms network delay
       const adjustedPosition = paused ? position : position + messageAge;
@@ -346,22 +245,27 @@ export class SyncEngine {
       this.global.updatedAt = now;
       this.global.setBy = setBy;
 
-      // Apply to player
       this._applyGlobalState(adjustedPosition, paused, doSeek, setBy, wasPaused);
     });
 
     socket.on("message", ({ text, system }: any) => {
       if (system && text?.includes("left the room")) {
         console.log(`[sync] ${text} — pausing player`);
-        if (this.mpvConnected) this._mpvSetPaused(true);
+        this._commandSetPaused(true);
       }
     });
   }
 
-  // ── Sync logic (mirrors Syncplay _changePlayerStateAccordingToGlobalState) ──
+  // ── Sync logic ───────────────────────────────────────────────────────────────
 
-  private _applyGlobalState(position: number, paused: boolean, doSeek: boolean, setBy: string | null, wasPaused: boolean) {
-    if (!this.mpvConnected) return;
+  private _applyGlobalState(
+    position: number,
+    paused: boolean,
+    doSeek: boolean,
+    setBy: string | null,
+    wasPaused: boolean
+  ) {
+    if (this.player.updatedAt === 0) return; // player not ready yet
 
     const playerPos = this._extrapolatePlayer();
     const diff = playerPos - position; // positive = we are ahead
@@ -370,32 +274,81 @@ export class SyncEngine {
     // Explicit seek from another user
     if (doSeek && setBy && setBy !== this.username) {
       console.log(`[sync] Remote seek by ${setBy} to ${position.toFixed(1)}s`);
-      this._mpvSeek(position); // suppress flag set inside _mpvSeek
+      this._commandSeek(position);
       return;
     }
 
     // We are way too far ahead — hard rewind
     if (diff > REWIND_THRESHOLD) {
       console.log(`[sync] Rewind: ${diff.toFixed(1)}s ahead`);
-      this._mpvSeek(position); // suppress flag set inside _mpvSeek
+      this._commandSeek(position);
       return;
     }
 
-    // We are slightly ahead — slow down to drift back
+    // We are slightly ahead — slow down
     if (!paused && diff > SLOWDOWN_THRESHOLD && !this.speedSlowed) {
       console.log(`[sync] Slowing down: ${diff.toFixed(1)}s ahead`);
       this.speedSlowed = true;
-      this._mpvSetSpeed(SLOWDOWN_RATE);
+      this._commandSetRate(SLOWDOWN_RATE);
     } else if (Math.abs(diff) < SLOWDOWN_RESET && this.speedSlowed) {
       console.log("[sync] Back in sync, restoring speed");
       this.speedSlowed = false;
-      this._mpvSetSpeed(1.0);
+      this._commandSetRate(1.0);
     }
 
-    // Pause/unpause changed
+    // Pause state changed
     if (pauseChanged) {
       console.log(`[sync] Remote ${paused ? "pause" : "play"} by ${setBy}`);
-      this._mpvSetPaused(paused); // suppress flag set inside _mpvSetPaused
+      this._commandSetPaused(paused);
+    }
+  }
+
+  // ── Player commands ──────────────────────────────────────────────────────────
+  // All go through getController() — works for MPV and VLC
+
+  private async _commandSeek(seconds: number) {
+    const ctrl = await getController();
+    if (!ctrl) return;
+    try {
+      this.suppressNextSeekEvent = true;
+      await ctrl.seek(seconds);
+      this.player.position = seconds;
+      this.player.updatedAt = Date.now();
+    } catch (e) {
+      this.suppressNextSeekEvent = false;
+      console.error("[sync] seek failed:", e);
+    }
+  }
+
+  private async _commandSetPaused(paused: boolean) {
+    const ctrl = await getController();
+    if (!ctrl) return;
+    try {
+      this.suppressNextPauseEvent = true;
+      await ctrl.setPaused(paused);
+      this.player.paused = paused;
+      this.player.updatedAt = Date.now();
+    } catch (e) {
+      this.suppressNextPauseEvent = false;
+      console.error("[sync] setPaused failed:", e);
+    }
+  }
+
+  private async _commandSetRate(rate: number) {
+    const ctrl = await getController();
+    if (!ctrl) return;
+    try {
+      // VlcController exposes setRate; MpvController doesn't have it as a named method
+      // but we can use seek/setPaused workaround — for now just try casting
+      if (typeof (ctrl as any).setRate === "function") {
+        await (ctrl as any).setRate(rate);
+      } else {
+        // MPV: use set_property speed via the underlying IPC
+        // MpvController doesn't expose setRate — add it via duck typing below
+        await (ctrl as any)._command(["set_property", "speed", rate]);
+      }
+    } catch (e) {
+      console.error("[sync] setRate failed:", e);
     }
   }
 
@@ -407,8 +360,6 @@ export class SyncEngine {
     const position = this._extrapolatePlayer();
     const paused = this.player.paused;
 
-    // Determine if this is a seek
-    // Seeked = player position differs from both previous player position AND global position
     const prevPos = this.lastSentState?.position ?? position;
     const globalPos = this._extrapolateGlobal();
     const playerDiff = Math.abs(prevPos - position);
@@ -427,12 +378,12 @@ export class SyncEngine {
     this.lastSentState = { position, paused };
   }
 
-  // ── Heartbeat ────────────────────────────────────────────────────────────────
+  // ── Heartbeat ─────────────────────────────────────────────────────────────────
 
   private _startHeartbeat() {
     this._stopHeartbeat();
     this.heartbeatTimer = setInterval(() => {
-      if (this.hubConnected && this.mpvConnected) {
+      if (this.hubConnected && this.player.updatedAt > 0) {
         this._sendStateToHub(true);
       }
     }, HEARTBEAT_INTERVAL);
@@ -445,7 +396,7 @@ export class SyncEngine {
     }
   }
 
-  // ── Position extrapolation ────────────────────────────────────────────────────
+  // ── Position extrapolation ───────────────────────────────────────────────────
 
   private _extrapolatePlayer(): number {
     if (!this.player.updatedAt) return 0;
@@ -464,18 +415,6 @@ export class SyncEngine {
   private _emitStatus() {
     this.onStatus?.(this.getStatus());
   }
-}
-
-export interface SyncStatus {
-  active: boolean;
-  mpvConnected: boolean;
-  hubConnected: boolean;
-  playerPosition: number;
-  playerPaused: boolean;
-  globalPosition: number;
-  globalPaused: boolean;
-  drift: number;
-  synced: boolean;
 }
 
 // ─── Singleton ────────────────────────────────────────────────────────────────

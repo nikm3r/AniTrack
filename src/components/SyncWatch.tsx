@@ -16,7 +16,7 @@ interface ChatMessage { sender: string; text: string; system?: boolean; }
 interface Props { anime: Anime[]; settings: any; }
 interface SyncStatus {
   active: boolean;
-  mpvConnected: boolean;
+  playerConnected: boolean;
   hubConnected: boolean;
   playerPosition: number;
   playerPaused: boolean;
@@ -272,7 +272,7 @@ export default function SyncWatch({ anime, settings }: Props) {
   };
 
   const connected = syncStatus?.hubConnected ?? false;
-  const playerConnected = syncStatus?.mpvConnected ?? false;
+  const playerConnected = syncStatus?.playerConnected ?? false;
 
   if (!isJoined) {
     return <JoinScreen onJoin={handleJoin} defaultNickname={settings?.nickname || ""} />;
