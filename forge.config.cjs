@@ -90,7 +90,7 @@ const config = {
             name: "AniTrack",
             icon: "./icon.icns",
             overwrite: true,
-            format: "ULFO",
+            format: "UDZO",  // ULFO causes hdiutil detach failures on GitHub Actions
           },
         }]
       : []),
