@@ -17,7 +17,7 @@ jobs:
       - run: npx electron-rebuild -f -w better-sqlite3
       - run: npm run build
       - name: Build and publish
-        run: npx electron-builder publish always
+        run: npx electron-builder build --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -56,7 +56,7 @@ jobs:
       - run: npx electron-rebuild -f -w better-sqlite3
       - run: npm run build
       - name: Build and publish
-        run: npx electron-builder publish always
+        run: npx electron-builder build --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -71,6 +71,6 @@ jobs:
       - run: npx electron-rebuild -f -w better-sqlite3
       - run: npm run build
       - name: Build and publish
-        run: npx electron-builder publish always
+        run: npx electron-builder build --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
