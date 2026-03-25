@@ -9,15 +9,15 @@
     "build": "npm run build:server && vite build",
     "build:server": "node esbuild.config.js",
     "start": "electron .",
-    "package": "npm run build && electron-builder",
+    "postinstall": "electron-builder install-app-deps",
+    "package": "npm run build && electron-builder build",
     "make": "npm run build && electron-builder build",
-    "publish": "npm run build && electron-builder publish always"
+    "publish": "npm run build && electron-builder build --publish always"
   },
   "keywords": [],
   "author": "nikm3r",
   "license": "MIT",
   "devDependencies": {
-    "@electron/rebuild": "^3.6.0",
     "@tailwindcss/vite": "^4.0.0",
     "@types/better-sqlite3": "^7.6.12",
     "@types/cors": "^2.8.17",

@@ -14,7 +14,6 @@ jobs:
         with:
           node-version: 22
       - run: npm ci
-      - run: npx electron-rebuild -f -w better-sqlite3
       - run: npm run build
       - name: Build and publish
         run: npx electron-builder build --publish always
@@ -53,7 +52,6 @@ jobs:
         with:
           node-version: 22
       - run: npm ci
-      - run: npx electron-rebuild -f -w better-sqlite3
       - run: npm run build
       - name: Build and publish
         run: npx electron-builder build --publish always
@@ -68,7 +66,6 @@ jobs:
         with:
           node-version: 22
       - run: npm ci
-      - run: npx electron-rebuild -f -w better-sqlite3
       - run: npm run build
       - name: Build and publish
         run: npx electron-builder build --publish always
