@@ -1,27 +1,28 @@
 # Maintainer: nikm3r <nmermigkas@gmail.com>
 pkgname=anitrack
-pkgver=0.4.7
+pkgver=0.4.8
 pkgrel=1
 pkgdesc="Anime tracking desktop app with AniList sync, torrent search and sync watch"
 arch=('x86_64')
 url="https://github.com/nikm3r/AniTrack"
 license=('MIT')
-depends=('gtk3' 'nss' 'alsa-lib' 'libxtst' 'libxss' 'libxrandr' 'mesa' 'libdrm')
+depends=('gtk3' 'nss' 'alsa-lib' 'libxtst' 'libxss' 'libxrandr' 'mesa' 'libdrm' 'fuse2')
 options=(!strip)
-source=("${pkgname}-${pkgver}.zip::https://github.com/nikm3r/AniTrack/releases/download/v${pkgver}/anitrack-${pkgver}.zip")
+source=("${pkgname}-${pkgver}.AppImage::https://github.com/nikm3r/AniTrack/releases/download/v${pkgver}/anitrack-${pkgver}.AppImage")
 sha256sums=('SKIP')
 
 package() {
-  local srcdir_inner="${srcdir}/AniTrack-linux-x64"
-
   install -dm755 "${pkgdir}/opt/anitrack"
-  cp -r "${srcdir_inner}/"* "${pkgdir}/opt/anitrack/"
 
-  chmod +x "${pkgdir}/opt/anitrack/anitrack"
+  # Copy AppImage and make it executable
+  install -Dm755 "${srcdir}/${pkgname}-${pkgver}.AppImage" \
+    "${pkgdir}/opt/anitrack/anitrack"
 
+  # Symlink to /usr/bin
   install -dm755 "${pkgdir}/usr/bin"
   ln -sf "/opt/anitrack/anitrack" "${pkgdir}/usr/bin/anitrack"
 
+  # Desktop entry
   install -dm755 "${pkgdir}/usr/share/applications"
   cat > "${pkgdir}/usr/share/applications/anitrack.desktop" << DESKTOP
 [Desktop Entry]
@@ -35,15 +36,4 @@ Terminal=false
 StartupNotify=true
 StartupWMClass=anitrack
 DESKTOP
-
-  install -dm755 "${pkgdir}/usr/share/icons/hicolor/256x256/apps"
-  if [ -f "${srcdir_inner}/icon.png" ]; then
-    install -Dm644 "${srcdir_inner}/icon.png" \
-      "${pkgdir}/usr/share/icons/hicolor/256x256/apps/anitrack.png"
-  fi
-  install -dm755 "${pkgdir}/usr/share/pixmaps"
-  if [ -f "${srcdir_inner}/icon.png" ]; then
-    install -Dm644 "${srcdir_inner}/icon.png" \
-      "${pkgdir}/usr/share/pixmaps/anitrack.png"
-  fi
 }
