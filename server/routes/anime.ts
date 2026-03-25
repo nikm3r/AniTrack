@@ -213,6 +213,25 @@ router.patch("/:id", (req: Request, res: Response) => {
   const updated = db
     .prepare("SELECT * FROM anime WHERE id = ?")
     .get(id) as Anime;
+
+  // Push to AniList if status or progress changed
+  if (("status" in req.body || "progress" in req.body) && updated.anilist_id) {
+    const tokenRow = db
+      .prepare("SELECT value FROM settings WHERE key = 'anilist_token'")
+      .get() as { value: string } | undefined;
+    const autoUpdate = db
+      .prepare("SELECT value FROM settings WHERE key = 'auto_update_tracker'")
+      .get() as { value: string } | undefined;
+
+    if (tokenRow?.value && autoUpdate?.value !== "false") {
+      const tracker = new AniListTracker();
+      tracker
+        .updateProgress(tokenRow.value, String(updated.anilist_id), updated.progress, updated.status)
+        .then(() => console.log(`[anime] AniList status/progress updated: ${updated.title_romaji} -> ${updated.status} ep${updated.progress}`))
+        .catch((e) => console.error("[anime] AniList update failed:", e));
+    }
+  }
+
   res.json({
     ...updated,
     genres: updated.genres ? JSON.parse(updated.genres) : [],
