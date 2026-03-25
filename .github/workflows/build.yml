@@ -8,11 +8,8 @@ permissions:
 jobs:
   create-release:
     runs-on: ubuntu-latest
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
       - name: Create GitHub Release
-        id: create_release
         uses: softprops/action-gh-release@v1
         with:
           draft: false
@@ -29,9 +26,10 @@ jobs:
       - run: npm ci
       - run: npm run build
       - name: Build and publish
-        run: npx electron-builder build --linux AppImage deb zip --publish always
+        run: npx electron-builder build --linux AppImage deb --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EP_DRAFT: false
 
   build-arch:
     runs-on: ubuntu-latest
@@ -42,27 +40,22 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install dependencies
         run: pacman -Syu --noconfirm && pacman -S --noconfirm base-devel curl git sudo
-      - name: Wait for AppImage to be available
+      - name: Wait for AppImage
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           URL="https://github.com/nikm3r/AniTrack/releases/download/${GITHUB_REF_NAME}/anitrack-${VERSION}.AppImage"
-          echo "Waiting for: $URL"
           for i in $(seq 1 30); do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" -L "$URL")
-            if [ "$STATUS" = "200" ]; then
-              echo "AppImage is available"
-              exit 0
-            fi
-            echo "Attempt $i: got $STATUS, retrying in 20s..."
+            if [ "$STATUS" = "200" ]; then echo "Ready"; exit 0; fi
+            echo "Attempt $i: $STATUS, waiting 20s..."
             sleep 20
           done
-          echo "Timed out"
           exit 1
       - name: Create build user
         run: |
           useradd -m builder
           echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
-      - name: Build package in temp dir
+      - name: Build package
         run: |
           mkdir -p /tmp/arch-build
           cp PKGBUILD /tmp/arch-build/
@@ -84,9 +77,10 @@ jobs:
       - run: npm ci
       - run: npm run build
       - name: Build and publish
-        run: npx electron-builder build --win nsis zip --publish always
+        run: npx electron-builder build --win nsis --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EP_DRAFT: false
 
   build-macos:
     runs-on: macos-latest
@@ -102,3 +96,4 @@ jobs:
         run: npx electron-builder build --mac dmg zip --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EP_DRAFT: false

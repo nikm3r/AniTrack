@@ -28,13 +28,13 @@ const config = {
     owner: "nikm3r",
     repo: "AniTrack",
     releaseType: "release",
+    publishAutoUpdate: true,
   },
 
   linux: {
     icon: "icon.png",
     category: "AudioVideo",
     executableName: "anitrack",
-    artifactName: "${name}-linux-x64-${version}.${ext}",
   },
   deb: {
     packageName: "anitrack",
@@ -44,7 +44,6 @@ const config = {
 
   win: {
     icon: "icon.png",
-    artifactName: "${name}-windows-x64-${version}.${ext}",
   },
   nsis: {
     oneClick: false,
@@ -56,7 +55,6 @@ const config = {
 
   mac: {
     icon: "icon.icns",
-    artifactName: "${name}-mac-${arch}-${version}.${ext}",
   },
   dmg: {
     title: "AniTrack",
