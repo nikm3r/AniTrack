@@ -9,6 +9,7 @@ const config = {
     "dist-server/**/*",
     "main.js",
     "preload.js",
+    "package.json",
   ],
 
   extraResources: [
