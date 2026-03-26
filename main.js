@@ -79,7 +79,7 @@ function createWindow() {
     mainWindow.loadURL(DEV_VITE_URL);
     mainWindow.webContents.openDevTools();
   } else {
-    mainWindow.loadFile(path.join(__dirname, "dist", "index.html"));
+    mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
   }
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {

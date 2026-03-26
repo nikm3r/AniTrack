@@ -1,11 +1,11 @@
 /** @type {import('electron-builder').Configuration} */
 const config = {
-  appId: "com.nikm3r.anitrack",
+  appId: "com.nikm.anitrack",
   productName: "AniTrack",
   copyright: "Copyright © 2025 nikm3r",
 
   files: [
-    "dist/**/*",
+    "renderer/**/*",
     "dist-server/**/*",
     "main.js",
     "preload.js",
@@ -28,12 +28,15 @@ const config = {
     icon: "icon.png",
     category: "AudioVideo",
     executableName: "anitrack",
+    executableArgs: ["--no-sandbox"],
+    desktop: {
+      Exec: "anitrack --no-sandbox %U",
+    },
   },
   deb: {
     packageName: "anitrack",
     maintainer: "nikm3r <nmermigkas@gmail.com>",
     homepage: "https://github.com/nikm3r/AniTrack",
-    afterInstall: "build/after-install.sh",
   },
 
   win: {

@@ -88,7 +88,7 @@ app.use("/api/*", (_req, res) => {
 });
 
 if (IS_PROD) {
-  const distPath = path.join(__dirname, "..", "dist");
+  const distPath = path.join(__dirname, "..", "renderer");
   app.use(express.static(distPath));
   app.get("*", (_req, res) => res.sendFile(path.join(distPath, "index.html")));
 }
