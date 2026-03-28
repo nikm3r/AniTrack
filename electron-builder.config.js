@@ -1,6 +1,6 @@
 /** @type {import('electron-builder').Configuration} */
 const config = {
-  appId: "com.nikm.anitrack",
+  appId: "com.nikm3r.anitrack",
   productName: "AniTrack",
   copyright: "Copyright © 2025 nikm3r",
 
@@ -41,6 +41,8 @@ const config = {
 
   win: {
     icon: "icon.png",
+    // Fix updater filename — no spaces, consistent naming
+    artifactName: "${name}-Setup-${version}.${ext}",
   },
   nsis: {
     oneClick: false,
@@ -52,6 +54,7 @@ const config = {
 
   mac: {
     icon: "icon.icns",
+    artifactName: "${name}-${version}-${arch}.${ext}",
   },
   dmg: {
     title: "AniTrack",
