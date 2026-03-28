@@ -41,8 +41,8 @@ const config = {
 
   win: {
     icon: "icon.png",
-    // Fix updater filename — no spaces, consistent naming
-    artifactName: "${name}-Setup-${version}.${ext}",
+    // Consistent naming so latest.yml matches the actual file
+    artifactName: "anitrack.Setup.${version}.${ext}",
   },
   nsis: {
     oneClick: false,
@@ -54,7 +54,7 @@ const config = {
 
   mac: {
     icon: "icon.icns",
-    artifactName: "${name}-${version}-${arch}.${ext}",
+    artifactName: "anitrack-${version}-${arch}.${ext}",
   },
   dmg: {
     title: "AniTrack",
