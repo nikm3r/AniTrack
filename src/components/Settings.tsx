@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import {
   ShieldCheck, FolderOpen,
   Database, Languages, ExternalLink, CheckCircle2, AlertCircle,
-  RefreshCw, Save, Eye, EyeOff, Users, Download,
+  RefreshCw, Save, Eye, EyeOff, Users, Download, Cloud, CloudUpload, CloudDownload,
 } from "lucide-react";
 import { Button } from "./ui/Button";
 import { Input } from "./ui/Input";
@@ -87,6 +87,10 @@ export function Settings({ settings, onSave, saving, onSyncComplete }: SettingsP
   const [updateVersion, setUpdateVersion] = useState<string | null>(null);
   const [updateProgress, setUpdateProgress] = useState<number>(0);
   const [updateError, setUpdateError] = useState<string | null>(null);
+
+  // Cloud settings sync state
+  const [cloudSyncing, setCloudSyncing] = useState(false);
+  const [cloudResult, setCloudResult] = useState<string | null>(null);
 
   useEffect(() => {
     const api = (window as any).electronAPI;
@@ -260,6 +264,44 @@ export function Settings({ settings, onSave, saving, onSyncComplete }: SettingsP
 
   // ─── Save ──────────────────────────────────────────────────────────────────
 
+  async function pushToCloud() {
+    if (!activeToken || !activeUser) return;
+    setCloudSyncing(true);
+    setCloudResult(null);
+    try {
+      const { pushSettings } = await import("../settingsSync");
+      await pushSettings(local, activeToken, activeUser.name);
+      setCloudResult("Settings pushed to cloud successfully.");
+    } catch (e) {
+      setCloudResult(`Push failed: ${e instanceof Error ? e.message : "Unknown error"}`);
+    } finally {
+      setCloudSyncing(false);
+    }
+  }
+
+  async function pullFromCloud() {
+    if (!activeToken || !activeUser) return;
+    setCloudSyncing(true);
+    setCloudResult(null);
+    try {
+      const { pullSettings } = await import("../settingsSync");
+      const pulled = await pullSettings(activeToken, activeUser.name);
+      const KEEP_LOCAL = ["base_folder", "torrent_client_path", "player_executable_path", "player_executable"];
+      const merged = { ...local };
+      for (const [k, v] of Object.entries(pulled)) {
+        if (!KEEP_LOCAL.includes(k)) merged[k] = v;
+      }
+      setLocal(merged);
+      await onSave(merged);
+      setCloudResult("Settings pulled and applied. Reloading…");
+      setTimeout(() => window.location.reload(), 1200);
+    } catch (e) {
+      setCloudResult(`Pull failed: ${e instanceof Error ? e.message : "Unknown error"}`);
+    } finally {
+      setCloudSyncing(false);
+    }
+  }
+
   async function handleSave() {
     // Don't persist internal temp fields
     const { _mal_code_verifier, ...toSave } = local;
@@ -298,6 +340,8 @@ export function Settings({ settings, onSave, saving, onSyncComplete }: SettingsP
   }
 
   const activeTracker = local.active_tracker ?? "anilist";
+  const activeToken = activeTracker === "mal" ? local.mal_token : local.anilist_token;
+  const activeUser = activeTracker === "mal" ? malUser : anilistUser;
   const syncReady = activeTracker === "anilist" ? !!anilistUser : !!malUser;
 
   return (
@@ -624,6 +668,34 @@ export function Settings({ settings, onSave, saving, onSyncComplete }: SettingsP
               <div className="h-full bg-emerald-500 rounded-full transition-all duration-300"
                 style={{ width: `${updateProgress}%` }} />
             </div>
+          )}
+        </Section>
+
+        {/* ── Cloud Sync ── */}
+        <Section icon={<Cloud className="w-5 h-5" />} title="Cloud Settings Sync">
+          <p className="text-xs text-zinc-500">
+            Settings are encrypted with your tracker token before upload — the server never sees plaintext.
+            Machine-specific paths (base folder, player, torrent client) are never synced.
+          </p>
+          {!activeUser && (
+            <p className="text-xs text-amber-400">Connect AniList or MAL first to enable cloud sync.</p>
+          )}
+          <div className="flex gap-3">
+            <Button variant="secondary" size="sm" loading={cloudSyncing} disabled={!activeUser || cloudSyncing}
+              icon={<CloudUpload className="w-3.5 h-3.5" />}
+              onClick={pushToCloud}>
+              Push to Cloud
+            </Button>
+            <Button variant="secondary" size="sm" loading={cloudSyncing} disabled={!activeUser || cloudSyncing}
+              icon={<CloudDownload className="w-3.5 h-3.5" />}
+              onClick={pullFromCloud}>
+              Pull from Cloud
+            </Button>
+          </div>
+          {cloudResult && (
+            <p className={`text-xs pl-0.5 ${cloudResult.includes("failed") || cloudResult.includes("Failed") ? "text-red-400" : "text-emerald-400"}`}>
+              {cloudResult}
+            </p>
           )}
         </Section>
 

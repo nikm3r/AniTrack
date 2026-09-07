@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
-  Play, Users, Search, Tag, FileEdit, SlidersHorizontal, ChevronRight,
+  Play, Users, Search, Tag, SlidersHorizontal, ChevronRight,
   MonitorPlay, CheckCircle, PauseCircle, XCircle, BookmarkPlus, Check, X, Trash2,
 } from "lucide-react";
 import { api } from "../api";
@@ -31,58 +31,102 @@ const STATUS_ITEMS: { value: AnimeStatus; label: string; icon: React.ReactNode }
   { value: "DROPPED",   label: "Dropped",             icon: <XCircle className="w-3.5 h-3.5" /> },
 ];
 
-function epLabel(n: number): string {
-  return `Episode ${String(n).padStart(2, "0")}`;
-}
-
 function guessEpisode(filename: string, totalEpisodes?: number | null): number | null {
   const base = filename.split("/").pop()?.split("\\").pop() || filename;
   const clean = base.replace(/\.[^.]+$/, "").replace(/\[[0-9A-Fa-f]{6,8}\]/g, "").trim();
-
   const tryN = (n: number): number | null => {
     if (n <= 0) return null;
     if (n >= 1900 && n <= 2100) return null;
     if (totalEpisodes && n > totalEpisodes) return null;
     return n;
   };
-
   const patterns: RegExp[] = [
-    /[Ss]\d{1,2}[Ee](\d{1,3})/,                    // S01E03
-    /[Ss]eason\s*\d+\s*[Ee]pisode\s*(\d{1,3})/i, // Season 1 Episode 3
-    /[Ee]pisode\s*(\d{1,3})/i,                       // Episode 03
-    /[Ee]p?\.?\s*(\d{1,3})(?!\d)/,                 // EP03, Ep 3
-    / - (\d{2,3})[\s\[.(]/,                         // " - 03 "
-    /[_ ](\d{2,3})[_\[. ]/,                          // _03_
-    /(?:^|[\s_\-])0*(\d{1,3})\s*$/,                // trailing bare number
+    /[Ss]\d{1,2}[Ee](\d{1,3})/,
+    /[Ss]eason\s*\d+\s*[Ee]pisode\s*(\d{1,3})/i,
+    /[Ee]pisode\s*(\d{1,3})/i,
+    /[Ee]p?\.?\s*(\d{1,3})(?!\d)/,
+    / - (\d{2,3})[\s\[.(]/,
+    /[_ ](\d{2,3})[_\[. ]/,
+    /(?:^|[\s_\-])0*(\d{1,3})\s*$/,
   ];
-
   for (const re of patterns) {
     const m = clean.match(re);
-    if (m) {
-      const result = tryN(parseInt(m[1], 10));
-      if (result !== null) return result;
-    }
+    if (m) { const result = tryN(parseInt(m[1], 10)); if (result !== null) return result; }
   }
   return null;
 }
 
 function filterKey(titleRomaji: string): string {
-  // Use romaji title as key — stable across resyncs, account changes, etc.
   return `filters_t_${titleRomaji.toLowerCase().replace(/[^a-z0-9]/g, "_")}`;
 }
-
 function loadFilters(animeId: number, titleRomaji: string): Filters {
   try {
-    const key = filterKey(titleRomaji);
-    const saved = localStorage.getItem(key);
+    const saved = localStorage.getItem(filterKey(titleRomaji));
     if (saved) return JSON.parse(saved);
   } catch { }
   return { altTitle: "", group: "", quality: "1080p", keywords: "", overridePath: "" };
 }
-
 function saveFilters(animeId: number, filters: Filters, titleRomaji: string) {
   localStorage.setItem(filterKey(titleRomaji), JSON.stringify(filters));
 }
+
+// ─── EpisodeFlyout — top-level component so it never unmounts on parent re-render ───
+
+interface EpisodeFlyoutProps {
+  visible: boolean;
+  forSync: boolean;
+  pos: { x: number; y: number };
+  files: ScannedFile[] | null;
+  loadingFiles: boolean;
+  totalEpisodes: number | null | undefined;
+  onMouseEnter: () => void;
+  onMouseLeave: () => void;
+  onLaunch: (filePath: string, forSync: boolean) => void;
+}
+
+const EpisodeFlyout = React.memo(function EpisodeFlyout({
+  visible, forSync, pos, files, loadingFiles, totalEpisodes, onMouseEnter, onMouseLeave, onLaunch,
+}: EpisodeFlyoutProps) {
+  const sortedFiles = files
+    ? [...files].sort((a, b) => (guessEpisode(a.name, totalEpisodes) ?? 999) - (guessEpisode(b.name, totalEpisodes) ?? 999))
+    : [];
+
+  const flipLeft = pos.x + 240 + 384 + 8 > window.innerWidth;
+  const flipUp = pos.y + 480 > window.innerHeight;
+
+  return (
+    <div
+      onMouseEnter={onMouseEnter}
+      onMouseLeave={onMouseLeave}
+      className="absolute w-96 bg-zinc-900 border border-white/10 rounded-xl shadow-2xl shadow-black/60 py-1.5 z-[902]"
+      style={{
+        ...(flipLeft ? { right: "100%", left: "auto", marginRight: "6px" } : { left: "100%", marginLeft: "6px" }),
+        ...(flipUp ? { bottom: 0, top: "auto" } : { top: 0, bottom: "auto" }),
+        maxHeight: "min(70vh, 480px)",
+        overflowY: "auto",
+        visibility: visible ? "visible" : "hidden",
+        pointerEvents: visible ? "auto" : "none",
+      }}
+    >
+      {loadingFiles && <p className="text-xs text-zinc-600 px-4 py-2">Scanning folder…</p>}
+      {!loadingFiles && sortedFiles.length === 0 && (
+        <div className="px-4 py-3">
+          <p className="text-xs text-zinc-500">No video files found</p>
+          <p className="text-[10px] text-zinc-700 mt-1">Set your base folder in Settings first</p>
+        </div>
+      )}
+      {sortedFiles.map((f, i) => (
+        <button key={i} onClick={() => onLaunch(f.fullPath, forSync)}
+          className="w-full px-4 py-2 text-left text-xs text-zinc-300 hover:bg-emerald-500/10 hover:text-emerald-400 transition-colors flex items-center gap-2">
+          <Play className="w-3 h-3 flex-shrink-0 shrink-0" />
+          <span className="text-left break-words min-w-0">{f.name.replace(/\.[^.]+$/, '')}</span>
+        </button>
+      ))}
+    </div>
+  );
+});
+
+// ─── Main ContextMenu ──────────────────────────────────────────────────────────
 
 export default function ContextMenu({ x, y, anime, onClose, onUpdate, onRemove, onSearchRequest, settings }: Props) {
   const ref = useRef<HTMLDivElement>(null);
@@ -92,13 +136,12 @@ export default function ContextMenu({ x, y, anime, onClose, onUpdate, onRemove, 
   const [filters, setFilters] = useState<Filters>(() => ({ ...loadFilters(anime.id, anime.title_romaji), altTitle: (anime as any).alt_title ?? "" }));
   const [files, setFiles] = useState<ScannedFile[] | null>(null);
   const [loadingFiles, setLoadingFiles] = useState(false);
-  const [pos, setPos] = useState({ x, y });
+  const [pos, setPos] = useState({ x: -9999, y: -9999 });
 
   const showItem = (name: string) => {
     if (hideTimer.current) clearTimeout(hideTimer.current);
     setHoveredItem(name);
   };
-
   const hideItem = () => {
     hideTimer.current = setTimeout(() => setHoveredItem(null), 150);
   };
@@ -111,10 +154,10 @@ export default function ContextMenu({ x, y, anime, onClose, onUpdate, onRemove, 
     const el = ref.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
-    setPos({
-      x: x + rect.width > window.innerWidth ? x - rect.width : x,
-      y: y + rect.height > window.innerHeight ? y - rect.height : y,
-    });
+    const MARGIN = 8;
+    const finalX = x + rect.width + MARGIN > window.innerWidth ? x - rect.width : x;
+    const finalY = y + rect.height + MARGIN > window.innerHeight ? y - rect.height : y;
+    setPos({ x: Math.max(MARGIN, finalX), y: Math.max(MARGIN, finalY) });
   }, [x, y]);
 
   useEffect(() => {
@@ -125,33 +168,28 @@ export default function ContextMenu({ x, y, anime, onClose, onUpdate, onRemove, 
       .finally(() => setLoadingFiles(false));
   }, [anime.id]);
 
-  const sortedFiles = files
-    ? [...files].sort((a, b) => (guessEpisode(a.name, (anime as any).total_episodes) ?? 999) - (guessEpisode(b.name, (anime as any).total_episodes) ?? 999))
-    : [];
-
-    const launchFile = async (filePath: string, forSync = false) => {
-      if (forSync) {
-        // Add to room queue via socket — do NOT launch locally
-        const ep = guessEpisode(filePath.split("/").pop() || filePath, (anime as any).total_episodes);
-        const socket = (window as any).__syncSocket;
-        const roomId = localStorage.getItem("last_room_id");
-        if (socket && roomId) {
-          socket.emit("add-to-playlist", {
-            roomId,
-            item: { mediaId: anime.anilist_id ?? anime.id, title: anime.title_romaji, epNum: ep ?? 1 },
-          });
-        } else {
-          alert("Join a Sync Watch room first!");
-        }
+  const launchFile = async (filePath: string, forSync = false) => {
+    if (forSync) {
+      const ep = guessEpisode(filePath.split("/").pop() || filePath, (anime as any).total_episodes);
+      const socket = (window as any).__syncSocket;
+      const roomId = localStorage.getItem("last_room_id");
+      if (socket && roomId) {
+        socket.emit("add-to-playlist", {
+          roomId,
+          item: { mediaId: anime.anilist_id ?? anime.id, title: anime.title_romaji, epNum: ep ?? 1 },
+        });
       } else {
-        try {
-          await api.post("/api/playback/launch", {
-            animeId: anime.id, filePath, trackingDelaySecs: parseInt(settings?.tracking_delay || "180", 10),
-          });
-        } catch (e) { console.error("Launch failed", e); }
+        alert("Join a Sync Watch room first!");
       }
-      onClose();
-    };
+    } else {
+      try {
+        await api.post("/api/playback/launch", {
+          animeId: anime.id, filePath, trackingDelaySecs: parseInt(settings?.tracking_delay || "180", 10),
+        });
+      } catch (e) { console.error("Launch failed", e); }
+    }
+    onClose();
+  };
 
   const handleSetStatus = async (status: AnimeStatus) => {
     try {
@@ -180,9 +218,7 @@ export default function ContextMenu({ x, y, anime, onClose, onUpdate, onRemove, 
     try {
       await api.delete(`/api/anime/${anime.id}`);
       onRemove?.(anime.id);
-    } catch (e) {
-      console.error(e);
-    }
+    } catch (e) { console.error(e); }
     onClose();
   };
 
@@ -196,69 +232,36 @@ export default function ContextMenu({ x, y, anime, onClose, onUpdate, onRemove, 
 
   const Divider = () => <div className="h-px bg-white/5 my-1" />;
 
-  const EpisodeFlyout = ({ forSync }: { forSync: boolean }) => {
-    const key = forSync ? "sync" : "play";
+  const StatusFlyout = () => {
+    const flipLeft = pos.x + 240 + 208 + 8 > window.innerWidth;
+    const flipUp = pos.y + 200 > window.innerHeight;
     return (
       <div
-        onMouseEnter={() => showItem(key)}
+        onMouseEnter={() => showItem("status")}
         onMouseLeave={hideItem}
-        className="absolute top-0 ml-1.5 w-96 bg-zinc-900 border border-white/10 rounded-xl shadow-2xl shadow-black/60 py-1.5 z-[902]"
-        style={{
-          ...(typeof window !== "undefined" && pos.x + 400 > window.innerWidth
-            ? { right: "100%", left: "auto" }
-            : { left: "100%", right: "auto" }),
-          maxHeight: "min(70vh, 480px)",
-          overflowY: "auto",
-        }}
+        className={`absolute w-52 bg-zinc-900 border border-white/10 rounded-xl shadow-2xl shadow-black/60 py-1.5 z-[902] ${flipLeft ? "right-full mr-1.5" : "left-full ml-1.5"}`}
+        style={flipUp ? { bottom: 0, top: "auto" } : { top: 0, bottom: "auto" }}
       >
-        {loadingFiles && <p className="text-xs text-zinc-600 px-4 py-2">Scanning folder…</p>}
-        {!loadingFiles && sortedFiles.length === 0 && (
-          <div className="px-4 py-3">
-            <p className="text-xs text-zinc-500">No video files found</p>
-            <p className="text-[10px] text-zinc-700 mt-1">Set your base folder in Settings first</p>
-          </div>
-        )}
-        {sortedFiles.map((f, i) => {
-          const ep = guessEpisode(f.name, (anime as any).total_episodes);
-          return (
-            <button key={i} onClick={() => launchFile(f.fullPath, forSync)}
-              className="w-full px-4 py-2 text-left text-xs text-zinc-300 hover:bg-emerald-500/10 hover:text-emerald-400 transition-colors flex items-center gap-2">
-              <Play className="w-3 h-3 flex-shrink-0 shrink-0" />
-              <span className="text-left break-words min-w-0">{f.name.replace(/\.[^.]+$/, '')}</span>
-            </button>
-          );
-        })}
+        {STATUS_ITEMS.map(s => (
+          <button key={s.value} onClick={() => handleSetStatus(s.value)}
+            className={`flex items-center gap-2.5 w-full px-4 py-2.5 text-xs text-left transition-colors ${
+              anime.status === s.value ? "text-emerald-400 bg-emerald-500/10" : "text-zinc-300 hover:bg-white/8 hover:text-zinc-100"
+            }`}>
+            <span className={anime.status === s.value ? "text-emerald-400" : "text-zinc-500"}>{s.icon}</span>
+            {s.label}
+            {anime.status === s.value && <Check className="w-3 h-3 ml-auto text-emerald-500" />}
+          </button>
+        ))}
       </div>
     );
   };
-
-  const StatusFlyout = () => (
-    <div
-      onMouseEnter={() => showItem("status")}
-      onMouseLeave={hideItem}
-      className="absolute left-full top-0 ml-1.5 w-52 bg-zinc-900 border border-white/10 rounded-xl shadow-2xl shadow-black/60 py-1.5 z-[902]"
-    >
-      {STATUS_ITEMS.map(s => (
-        <button key={s.value} onClick={() => handleSetStatus(s.value)}
-          className={`flex items-center gap-2.5 w-full px-4 py-2.5 text-xs text-left transition-colors ${
-            anime.status === s.value
-              ? "text-emerald-400 bg-emerald-500/10"
-              : "text-zinc-300 hover:bg-white/8 hover:text-zinc-100"
-          }`}>
-          <span className={anime.status === s.value ? "text-emerald-400" : "text-zinc-500"}>{s.icon}</span>
-          {s.label}
-          {anime.status === s.value && <Check className="w-3 h-3 ml-auto text-emerald-500" />}
-        </button>
-      ))}
-    </div>
-  );
 
   if (showFilters) {
     return (
       <>
         <div className="fixed inset-0 z-[900]" onClick={onClose} />
         <div ref={ref}
-          style={{ left: Math.min(pos.x, window.innerWidth - 380), top: Math.min(pos.y, window.innerHeight - 400) }}
+          style={{ left: "50%", top: "50%", transform: "translate(-50%, -50%)" }}
           onClick={e => e.stopPropagation()}
           className="fixed z-[901] w-96 bg-zinc-900 border border-white/10 rounded-2xl shadow-2xl p-5">
           <div className="flex items-center justify-between mb-4">
@@ -339,7 +342,17 @@ export default function ContextMenu({ x, y, anime, onClose, onUpdate, onRemove, 
             <span className="flex-1">Play Solo</span>
             <ChevronRight className="w-3.5 h-3.5 text-zinc-600" />
           </button>
-          {hoveredItem === "play" && <EpisodeFlyout forSync={false} />}
+          <EpisodeFlyout
+            visible={hoveredItem === "play"}
+            forSync={false}
+            pos={pos}
+            files={files}
+            loadingFiles={loadingFiles}
+            totalEpisodes={(anime as any).total_episodes}
+            onMouseEnter={() => showItem("play")}
+            onMouseLeave={hideItem}
+            onLaunch={launchFile}
+          />
         </div>
 
         {/* Add to Sync Play */}
@@ -351,7 +364,17 @@ export default function ContextMenu({ x, y, anime, onClose, onUpdate, onRemove, 
             <span className="flex-1">Add to Sync Play</span>
             <ChevronRight className="w-3.5 h-3.5 text-zinc-600" />
           </button>
-          {hoveredItem === "sync" && <EpisodeFlyout forSync={true} />}
+          <EpisodeFlyout
+            visible={hoveredItem === "sync"}
+            forSync={true}
+            pos={pos}
+            files={files}
+            loadingFiles={loadingFiles}
+            totalEpisodes={(anime as any).total_episodes}
+            onMouseEnter={() => showItem("sync")}
+            onMouseLeave={hideItem}
+            onLaunch={launchFile}
+          />
         </div>
 
         <Divider />
