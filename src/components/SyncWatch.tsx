@@ -12,7 +12,7 @@ import type { Anime } from "../types/anime";
 
 interface PlaylistItem { mediaId: number; title: string; epNum: number; }
 interface RoomData { playlist: PlaylistItem[]; currentIndex: number; readyUsers: Record<string, boolean>; users: string[]; }
-interface ChatMessage { sender: string; text: string; system?: boolean; }
+interface ChatMessage { sender: string; text: string; system?: boolean; danger?: boolean; }
 interface Props { anime: Anime[]; settings: any; }
 interface SyncStatus {
   active: boolean;
@@ -120,6 +120,7 @@ export default function SyncWatch({ anime, settings }: Props) {
   const nicknameRef = useRef("");
   const roomIdRef = useRef("");
   const statusPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastLaunchRef = useRef<string>("");  // track last launched mediaId+epNum to prevent duplicates
 
   const hubUrl = settings?.hub_url || "https://anitrack-hub.onrender.com";
   const myName = nickname || settings?.nickname || "Guest";
@@ -173,7 +174,18 @@ export default function SyncWatch({ anime, settings }: Props) {
       setMessages(prev => [...prev, msg]);
     });
 
+    socket.on("peer-disconnected", (data: { username: string }) => {
+      setMessages(prev => [...prev, {
+        sender: "system",
+        text: `⚠ ${data.username} disconnected — playback paused.`,
+        danger: true,
+      }]);
+    });
+
     socket.on("auto-launch-request", async (target: { mediaId: number; epNum: number }) => {
+      const launchKey = `${target.mediaId}-${target.epNum}`;
+      if (lastLaunchRef.current === launchKey) return; // already launched this episode
+      lastLaunchRef.current = launchKey;
       const animeData = anime.find(a => a.id === target.mediaId || a.anilist_id === target.mediaId);
       if (!animeData) return;
       try {
@@ -235,6 +247,7 @@ export default function SyncWatch({ anime, settings }: Props) {
     await api.post("/api/sync/leave", {});
     socketRef.current?.emit("leave-room", { roomId: roomIdRef.current, username: nicknameRef.current });
     socketRef.current?.disconnect();
+    lastLaunchRef.current = ""; // reset launch dedup on leave
     setIsJoined(false);
     setRoomData({ playlist: [], currentIndex: 0, readyUsers: {}, users: [] });
     setMessages([]);
@@ -409,6 +422,11 @@ export default function SyncWatch({ anime, settings }: Props) {
             <div className="flex-1 overflow-y-auto scrollbar-thin p-3 space-y-2 min-h-0">
               {messages.length === 0 && <p className="text-xs text-zinc-700 text-center mt-4">No messages yet</p>}
               {messages.map((msg, i) => {
+                if (msg.danger) return (
+                  <div key={i} className="text-center">
+                    <span className="text-[10px] text-red-400 font-bold italic">{msg.text}</span>
+                  </div>
+                );
                 if (msg.system) return (
                   <div key={i} className="text-center">
                     <span className="text-[10px] text-zinc-700 italic">{msg.text}</span>

@@ -196,6 +196,23 @@ export class SyncEngine {
       this._notifyPeers();
     });
 
+    this.socket.on("peer-disconnected", async (data: { username: string }) => {
+      console.log(`[sync] Peer disconnected: ${data.username} — pausing`);
+      const ctrl = await getController();
+      if (ctrl) {
+        try {
+          await ctrl.setPaused(true);
+          this._playerPaused = true;
+          this._lastPlayerUpdate = Date.now();
+          this._globalPaused = true;
+          this._lastGlobalUpdate = Date.now();
+          this._broadcastState(this.getPlayerPosition(), true, false);
+        } catch {}
+      }
+      // Notify UI
+
+    });
+
     this.socket.on("host-changed", (data: any) => {
       this.isHost = data.host === this.username;
       console.log(`[sync] Host is now: ${data.host} (me: ${this.isHost})`);
@@ -451,12 +468,51 @@ export class SyncEngine {
     if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; }
   }
 
+  private _playerWasConnected = false;
+
   private async _poll() {
     if (!this.active) return;
     const ctrl = await getController();
-    if (!ctrl) return;
+    if (!ctrl) {
+      if (this._playerWasConnected) {
+        this._playerWasConnected = false;
+        console.log("[sync] Player closed — pausing");
+        this._globalPaused = true;
+        this._lastGlobalUpdate = Date.now();
+        this._broadcastState(this.getPlayerPosition(), true, false);
+        // Notify all peers via hub
+        if (this.socket?.connected) {
+          this.socket.emit("message", {
+            roomId: this.room,
+            sender: "system",
+            text: `⚠ ${this.username} closed their player — playback paused.`,
+            danger: true,
+          });
+        }
+      }
+      return;
+    }
     const status = await ctrl.getStatus();
-    if (!status) return;
+    if (!status) {
+      if (this._playerWasConnected) {
+        this._playerWasConnected = false;
+        console.log("[sync] Player closed — pausing");
+        this._globalPaused = true;
+        this._lastGlobalUpdate = Date.now();
+        this._broadcastState(this.getPlayerPosition(), true, false);
+        // Notify all peers via hub
+        if (this.socket?.connected) {
+          this.socket.emit("message", {
+            roomId: this.room,
+            sender: "system",
+            text: `⚠ ${this.username} closed their player — playback paused.`,
+            danger: true,
+          });
+        }
+      }
+      return;
+    }
+    this._playerWasConnected = true;
 
     const now = Date.now();
 
