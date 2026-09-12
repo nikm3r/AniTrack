@@ -101,6 +101,9 @@ export class SyncEngine {
   // ── Debounce ──────────────────────────────────────────────────────────────
   private _lastPauseCommandAt = 0;
   private _lastBroadcastAt = 0;
+  // Set true after we apply remote state — suppresses rebroadcast on next poll
+  // (mirrors Syncplay's askPlayer() re-sync after madeChangeOnPlayer)
+  private _suppressNextDetection = false;
 
   // ── Peers ─────────────────────────────────────────────────────────────────
   private peers = new Map<string, PeerState>();
@@ -266,7 +269,7 @@ export class SyncEngine {
     const now = Date.now();
 
     // Syncplay: compute diff and pauseChanged BEFORE updating global state
-    const pauseChanged = paused !== this.getGlobalPaused() || paused !== this.getPlayerPaused();
+    const pauseChanged = paused !== this.getGlobalPaused() && paused !== this.getPlayerPaused();
     const diff = this.getPlayerPosition() - position; // positive = we are ahead
 
     // ── CRITICAL: Update global state FIRST (Syncplay does this before corrections)
@@ -325,6 +328,7 @@ export class SyncEngine {
     }
 
     // ── 5. Apply pause/unpause
+    let madeChange = doSeek;
     if (pauseChanged) {
       if (now - this._lastPauseCommandAt > PAUSE_DEBOUNCE) {
         if (paused) {
@@ -333,7 +337,27 @@ export class SyncEngine {
           await this._serverUnpaused(ctrl, setBy);
         }
         this._lastPauseCommandAt = now;
+        madeChange = true;
       }
+    }
+
+    // Syncplay calls askPlayer() after madeChangeOnPlayer — re-sync our cached
+    // player state to reality so the next poll doesn't detect our own applied
+    // change as a new local action and rebroadcast it (the flicker bug).
+    if (madeChange) {
+      this._suppressNextDetection = true;
+      // Re-read player state after a short settle delay
+      setTimeout(async () => {
+        try {
+          const c = await getController();
+          const s = c ? await c.getStatus() : null;
+          if (s) {
+            this._playerPosition = s.position;
+            this._playerPaused = s.paused;
+            this._lastPlayerUpdate = Date.now();
+          }
+        } catch {}
+      }, 250);
     }
   }
 
@@ -455,12 +479,17 @@ export class SyncEngine {
 
     // Broadcast on pause change or seek (Syncplay's sendState call)
     if (pauseChange || seeked) {
-      if (seeked) {
-        console.log(`[sync] Local seek: ${prevPosition.toFixed(2)} → ${status.position.toFixed(2)}`);
+      // Suppress if this change was caused by us applying remote state
+      if (this._suppressNextDetection) {
+        this._suppressNextDetection = false;
       } else {
-        console.log(`[sync] Local ${status.paused ? "pause" : "play"} at ${status.position.toFixed(2)}s`);
+        if (seeked) {
+          console.log(`[sync] Local seek: ${prevPosition.toFixed(2)} → ${status.position.toFixed(2)}`);
+        } else {
+          console.log(`[sync] Local ${status.paused ? "pause" : "play"} at ${status.position.toFixed(2)}s`);
+        }
+        this._broadcastState(status.position, status.paused, seeked);
       }
-      this._broadcastState(status.position, status.paused, seeked);
     }
   }
 
