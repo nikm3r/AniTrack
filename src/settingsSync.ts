@@ -12,13 +12,16 @@ const EXCLUDE_KEYS = new Set([
   "player_executable",
 ]);
 
-async function deriveKey(token: string): Promise<CryptoKey> {
+async function deriveKey(token: string, username: string): Promise<CryptoKey> {
   const enc = new TextEncoder();
+  // Key is derived from username (stable across devices) + token (for auth)
+  // We use username as salt and token as additional entropy via a combined secret
+  const secret = `${username}:anitrack-settings-v1`;
   const keyMaterial = await crypto.subtle.importKey(
-    "raw", enc.encode(token), "PBKDF2", false, ["deriveKey"]
+    "raw", enc.encode(secret), "PBKDF2", false, ["deriveKey"]
   );
   return crypto.subtle.deriveKey(
-    { name: "PBKDF2", salt: enc.encode("anitrack-settings-v1"), iterations: 100000, hash: "SHA-256" },
+    { name: "PBKDF2", salt: enc.encode(username), iterations: 100000, hash: "SHA-256" },
     keyMaterial,
     { name: "AES-GCM", length: 256 },
     false,
@@ -136,7 +139,7 @@ export async function pushSettings(
   token: string,
   username: string
 ): Promise<void> {
-  const key = await deriveKey(token);
+  const key = await deriveKey(token, username);
 
   // Push app settings
   const appPayload = Object.fromEntries(
@@ -154,7 +157,7 @@ export async function pullSettings(
   token: string,
   username: string
 ): Promise<Record<string, string>> {
-  const key = await deriveKey(token);
+  const key = await deriveKey(token, username);
 
   // Pull and apply series settings first
   try {
