@@ -1,6 +1,6 @@
 /**
  * syncEngine.ts — AniTrack SyncWatch sync engine
- * Faithful implementation of Syncplay 1.7.5 client.py sync algorithm.
+ * Based on Syncplay 1.7.5 client.py algorithm.
  */
 
 import { Server as SocketIOServer } from "socket.io";
@@ -8,21 +8,21 @@ import { getController, IPlayerController } from "./playerController.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const PLAYER_ASK_DELAY              = 0.1;
-const SEEK_THRESHOLD                = 1.0;
-const DEFAULT_REWIND_THRESHOLD      = 4.0;
-const FASTFORWARD_BEHIND_THRESHOLD  = 1.75;
-const DEFAULT_FASTFORWARD_THRESHOLD = 5.0;
-const FASTFORWARD_EXTRA_TIME        = 0.25;
-const FASTFORWARD_RESET_THRESHOLD   = 3.0;
-const SLOWDOWN_RATE                 = 0.95;
-const DEFAULT_SLOWDOWN_KICKIN       = 1.5;
-const SLOWDOWN_RESET_THRESHOLD      = 0.1;
-const SYNC_ON_PAUSE                 = true;
-const PAUSE_DEBOUNCE                = 500;
-const BROADCAST_INTERVAL            = 500;
-const JOIN_BROADCAST_HOLDOFF        = 3000; // ms — don't broadcast after join, receive first
-const SEEK_SUPPRESS_MS              = 700;  // ms — suppress after applying remote seek
+const PLAYER_ASK_DELAY             = 0.1;   // 100ms poll interval
+const SEEK_THRESHOLD               = 1.0;   // seconds — seek vs drift
+const DEFAULT_REWIND_THRESHOLD     = 4.0;   // seconds ahead → rewind
+const FASTFORWARD_BEHIND_THRESHOLD = 1.75;  // seconds behind before FF tracking
+const DEFAULT_FASTFORWARD_THRESHOLD= 5.0;   // seconds behind → FF
+const FASTFORWARD_EXTRA_TIME       = 0.25;  // overshoot when FF
+const FASTFORWARD_RESET_THRESHOLD  = 3.0;   // seconds before re-checking FF
+const SLOWDOWN_RATE                = 0.95;  // rate for slow correction
+const DEFAULT_SLOWDOWN_KICKIN      = 1.5;   // seconds drift → slow down
+const SLOWDOWN_RESET_THRESHOLD     = 0.1;   // seconds drift → restore rate
+const SYNC_ON_PAUSE                = true;  // seek to peer pos when paused
+const PAUSE_DEBOUNCE               = 500;   // ms — avoid double pause
+const BROADCAST_INTERVAL           = 500;   // ms — periodic state broadcast
+const JOIN_BROADCAST_HOLDOFF       = 3000;  // ms — don't broadcast after join
+const SEEK_SUPPRESS_MS             = 700;   // ms — suppress after remote seek
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -50,7 +50,7 @@ export class SyncEngine {
   private _playerPaused = true;
   private _lastPlayerUpdate: number | null = null;
 
-  // ── Global state from hub ─────────────────────────────────────────────────
+  // ── Global (peer) state from hub ──────────────────────────────────────────
   private _globalPosition = 0.0;
   private _globalPaused = true;
   private _lastGlobalUpdate: number | null = null;
@@ -62,10 +62,10 @@ export class SyncEngine {
   // ── Debounce / suppress ───────────────────────────────────────────────────
   private _lastPauseCommandAt = 0;
   private _lastBroadcastAt = 0;
-  private _suppressUntil = 0;   // suppress local broadcast until this timestamp
-  private _joinedAt = 0;        // timestamp of join — hold off broadcasts for JOIN_BROADCAST_HOLDOFF
+  private _suppressUntil = 0;  // suppress local broadcast until this timestamp
+  private _joinedAt = 0;       // holdoff broadcasts for JOIN_BROADCAST_HOLDOFF
 
-  // ── Player reconnect tracking ─────────────────────────────────────────────
+  // ── Player reconnect ──────────────────────────────────────────────────────
   private _playerWasConnected = false;
 
   // ── Peers ─────────────────────────────────────────────────────────────────
@@ -79,6 +79,7 @@ export class SyncEngine {
   getRoom(): string { return this.room; }
   getPeers(): PeerState[] { return [...this.peers.values()]; }
 
+  // Extrapolates from last known position
   getPlayerPosition(): number {
     if (!this._lastPlayerUpdate) return this._lastGlobalUpdate ? this.getGlobalPosition() : 0.0;
     let pos = this._playerPosition;
@@ -91,6 +92,7 @@ export class SyncEngine {
     return this._playerPaused;
   }
 
+  // Extrapolates from last known peer position
   getGlobalPosition(): number {
     if (!this._lastGlobalUpdate) return 0.0;
     let pos = this._globalPosition;
@@ -103,7 +105,9 @@ export class SyncEngine {
     return this._globalPaused;
   }
 
+  // Syncplay's _determinePlayerStateChange
   private _determinePlayerStateChange(paused: boolean, position: number): { pauseChange: boolean; seeked: boolean } {
+    // pauseChange: both global AND player disagree with new state (prevents oscillation)
     const pauseChange = this.getPlayerPaused() !== paused && this.getGlobalPaused() !== paused;
     const playerDiff = Math.abs(this.getPlayerPosition() - position);
     const globalDiff = Math.abs(this.getGlobalPosition() - position);
@@ -206,6 +210,7 @@ export class SyncEngine {
     const setBy: string = data.setBy ?? "";
     const doSeek: boolean = data.doSeek === true;
 
+    // Compensate for message transit time
     const messageAge = data.ts ? Math.max(0, (now - data.ts) / 1000) : 0;
     if (!paused) position += messageAge;
 
@@ -227,6 +232,10 @@ export class SyncEngine {
   ) {
     const now = Date.now();
 
+    // Compute diff and pauseChanged BEFORE updating global state
+    const pauseChanged = paused !== this.getGlobalPaused() && paused !== this.getPlayerPaused();
+    const diff = this.getPlayerPosition() - position;
+
     // Update global state FIRST
     const isFirstUpdate = this._lastGlobalUpdate === null;
     this._globalPosition = position;
@@ -234,15 +243,10 @@ export class SyncEngine {
     this._lastGlobalUpdate = now;
 
     const ctrl = await getController();
-
-    // Store global state even if player isn't open yet —
-    // _poll will seek when player connects
+    // If player not open yet, global state is stored and will be used when player connects
     if (!ctrl) return;
 
-    const pauseChanged = paused !== this.getPlayerPaused();
-    const diff = this.getPlayerPosition() - position;
-
-    // First state update — seek player to hub position if it differs
+    // First state update — seek to peer position if player differs
     if (isFirstUpdate) {
       const status = await ctrl.getStatus();
       const playerPos = status?.position ?? 0;
@@ -259,15 +263,15 @@ export class SyncEngine {
       return;
     }
 
-    // ── 1. doSeek
+    // ── 1. Explicit seek from peer
     if (doSeek) await this._serverSeeked(ctrl, position, setBy);
 
-    // ── 2. Rewind
+    // ── 2. Rewind — we are too far ahead
     if (diff > DEFAULT_REWIND_THRESHOLD && !doSeek) {
       await this._rewindPlayerDueToTimeDifference(ctrl, position, setBy);
     }
 
-    // ── 3. Fast forward
+    // ── 3. Fast forward — we are too far behind
     if (diff < (FASTFORWARD_BEHIND_THRESHOLD * -1) && !doSeek) {
       if (this._behindFirstDetected === null) {
         this._behindFirstDetected = now;
@@ -285,12 +289,12 @@ export class SyncEngine {
       this._behindFirstDetected = null;
     }
 
-    // ── 4. Slow down
+    // ── 4. Slow down for small drift
     if (!doSeek && !paused) {
       await this._slowDownToCoverTimeDifference(ctrl, diff, setBy);
     }
 
-    // ── 5. Pause/unpause
+    // ── 5. Apply pause/unpause
     let madeChange = doSeek;
     if (pauseChanged) {
       if (now - this._lastPauseCommandAt > PAUSE_DEBOUNCE) {
@@ -343,7 +347,7 @@ export class SyncEngine {
   private async _fastforwardPlayerDueToTimeDifference(ctrl: IPlayerController, position: number, setBy: string) {
     if (setBy === this.username) return;
     const target = position + FASTFORWARD_EXTRA_TIME;
-    console.log(`[sync] Fast forward: ${Math.abs(this.getPlayerPosition() - position).toFixed(2)}s behind → ${target.toFixed(2)}s`);
+    console.log(`[sync] FF: ${Math.abs(this.getPlayerPosition() - position).toFixed(2)}s behind → ${target.toFixed(2)}s`);
     await this._setPosition(ctrl, target);
     if (this._speedChanged) {
       try { await ctrl.setRate(1.0); } catch {}
@@ -444,14 +448,14 @@ export class SyncEngine {
       return;
     }
 
-    // Player just reconnected — seek to global position
+    // Player just reconnected — seek to peer's current position
     if (!this._playerWasConnected && this._lastGlobalUpdate) {
-      const globalPos = this.getGlobalPosition();
-      console.log(`[sync] Player reconnected, seeking to ${globalPos.toFixed(2)}s`);
+      const peerPos = this.getGlobalPosition();
+      console.log(`[sync] Player reconnected — seeking to peer position ${peerPos.toFixed(2)}s`);
       try {
-        await ctrl.seek(globalPos);
+        await ctrl.seek(peerPos);
         await ctrl.setPaused(this._globalPaused);
-        this._playerPosition = globalPos;
+        this._playerPosition = peerPos;
         this._playerPaused = this._globalPaused;
         this._lastPlayerUpdate = Date.now();
         this._suppressUntil = Date.now() + SEEK_SUPPRESS_MS;
@@ -477,7 +481,7 @@ export class SyncEngine {
 
     if (pauseChange || seeked) {
       if (Date.now() < this._suppressUntil) {
-        // suppressed — don't rebroadcast
+        // suppressed — remote change applied, don't echo back
       } else {
         if (seeked) {
           console.log(`[sync] Local seek: ${prevPosition.toFixed(2)} → ${status.position.toFixed(2)}`);
@@ -511,7 +515,7 @@ export class SyncEngine {
 
   private _broadcastState(position: number, paused: boolean, doSeek: boolean) {
     if (!this.active || !this.socket?.connected) return;
-    // Hold off broadcasts for JOIN_BROADCAST_HOLDOFF after joining
+    // Hold off broadcasts after joining — receive peer state first
     if (Date.now() - this._joinedAt < JOIN_BROADCAST_HOLDOFF) return;
     const msg: any = {
       roomId: this.room,
