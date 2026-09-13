@@ -220,6 +220,7 @@ export class SyncEngine {
     });
 
     this.active = true;
+    this._joinedAt = Date.now();
     this._startPolling();
     this._startBroadcasting();
   }
@@ -299,10 +300,7 @@ export class SyncEngine {
     // First state update — init player
     if (isFirstUpdate) {
       const status = await ctrl.getStatus();
-      // Always seek to hub position on first update if player is near start
-      // or if hub position is significantly ahead of player
-      const playerPos = status?.position ?? 0;
-      if (!status || Math.abs(playerPos - position) > 2.0) {
+      if (!status || status.position === 0) {
         try {
           await this._setPosition(ctrl, position);
           await ctrl.setPaused(paused);
@@ -574,6 +572,8 @@ export class SyncEngine {
 
   private _broadcastState(position: number, paused: boolean, doSeek: boolean) {
     if (!this.active || !this.socket?.connected) return;
+    // Don't broadcast for 3s after joining — receive hub state first
+    if (Date.now() - this._joinedAt < 3000) return;
     const msg: any = {
       roomId: this.room,
       position,
