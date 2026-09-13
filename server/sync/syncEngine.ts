@@ -267,12 +267,12 @@ export class SyncEngine {
     if (doSeek) await this._serverSeeked(ctrl, position, setBy);
 
     // ── 2. Rewind — we are too far ahead
-    if (diff > DEFAULT_REWIND_THRESHOLD && !doSeek) {
+    if (diff > DEFAULT_REWIND_THRESHOLD && !doSeek && Date.now() > this._suppressUntil) {
       await this._rewindPlayerDueToTimeDifference(ctrl, position, setBy);
     }
 
     // ── 3. Fast forward — we are too far behind
-    if (diff < (FASTFORWARD_BEHIND_THRESHOLD * -1) && !doSeek) {
+    if (diff < (FASTFORWARD_BEHIND_THRESHOLD * -1) && !doSeek && Date.now() > this._suppressUntil) {
       if (this._behindFirstDetected === null) {
         this._behindFirstDetected = now;
       } else {
@@ -505,6 +505,7 @@ export class SyncEngine {
       if (!status) return;
       const now = Date.now();
       if (now - this._lastBroadcastAt < BROADCAST_INTERVAL) return;
+      if (now < this._suppressUntil) return; // suppress periodic broadcast after remote seek
       this._broadcastState(status.position, status.paused, false);
     }, BROADCAST_INTERVAL);
   }
@@ -517,6 +518,8 @@ export class SyncEngine {
     if (!this.active || !this.socket?.connected) return;
     // Hold off broadcasts after joining — receive peer state first
     if (Date.now() - this._joinedAt < JOIN_BROADCAST_HOLDOFF) return;
+    // When we send a seek, suppress incoming corrections immediately
+    if (doSeek) this._suppressUntil = Date.now() + SEEK_SUPPRESS_MS;
     const msg: any = {
       roomId: this.room,
       position,
