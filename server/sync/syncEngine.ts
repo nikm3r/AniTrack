@@ -299,7 +299,10 @@ export class SyncEngine {
     // First state update — init player
     if (isFirstUpdate) {
       const status = await ctrl.getStatus();
-      if (!status || status.position === 0) {
+      // Always seek to hub position on first update if player is near start
+      // or if hub position is significantly ahead of player
+      const playerPos = status?.position ?? 0;
+      if (!status || Math.abs(playerPos - position) > 2.0) {
         try {
           await this._setPosition(ctrl, position);
           await ctrl.setPaused(paused);
