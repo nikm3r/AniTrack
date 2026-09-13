@@ -137,6 +137,7 @@ export default function SyncWatch({ anime, settings }: Props) {
       try {
         const status = await api.get<SyncStatus>("/api/sync/status");
         setSyncStatus(status);
+        (window as any).__syncPlayerConnected = status.playerConnected === true;
       } catch {}
     }, 500);
   }, []);
@@ -174,6 +175,10 @@ export default function SyncWatch({ anime, settings }: Props) {
       setMessages(prev => [...prev, msg]);
     });
 
+    socket.on("sync-player-closed", () => {
+      lastLaunchRef.current = ""; // allow relaunch after player closes
+    });
+
     socket.on("peer-disconnected", (data: { username: string }) => {
       setMessages(prev => [...prev, {
         sender: "system",
@@ -184,7 +189,9 @@ export default function SyncWatch({ anime, settings }: Props) {
 
     socket.on("auto-launch-request", async (target: { mediaId: number; epNum: number }) => {
       const launchKey = `${target.mediaId}-${target.epNum}`;
-      if (lastLaunchRef.current === launchKey) return; // already launched this episode
+      // Block duplicate launches only if the player is actually connected and running
+      const playerActive = (window as any).__syncPlayerConnected === true;
+      if (lastLaunchRef.current === launchKey && playerActive) return;
       lastLaunchRef.current = launchKey;
       const animeData = anime.find(a => a.id === target.mediaId || a.anilist_id === target.mediaId);
       if (!animeData) return;
