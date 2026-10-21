@@ -60,10 +60,10 @@ router.get("/", async (req: Request, res: Response) => {
 
   const db = getDb();
   const animeRows = db.prepare(
-    "SELECT id, anilist_id, mal_id, title_romaji, title_english, cover_image, progress, total_episodes, status FROM anime WHERE status = 'WATCHING'"
+    "SELECT id, anilist_id, mal_id, title_romaji, title_english, alt_title, download_path, cover_image, progress, total_episodes, status FROM anime WHERE status = 'WATCHING'"
   ).all() as {
     id: number; anilist_id: number | null; mal_id: number | null;
-    title_romaji: string; title_english: string | null; cover_image: string | null;
+    title_romaji: string; title_english: string | null; alt_title: string | null; download_path: string | null; cover_image: string | null;
     progress: number; total_episodes: number | null; status: string;
   }[];
 
@@ -117,6 +117,7 @@ router.get("/", async (req: Request, res: Response) => {
         libraryAnime: {
           id: libraryAnime.id, anilist_id: libraryAnime.anilist_id, mal_id: libraryAnime.mal_id,
           title_romaji: libraryAnime.title_romaji, title_english: libraryAnime.title_english,
+          alt_title: libraryAnime.alt_title, download_path: libraryAnime.download_path,
           cover_image: libraryAnime.cover_image, progress: libraryAnime.progress,
           total_episodes: libraryAnime.total_episodes, status: libraryAnime.status,
         },
