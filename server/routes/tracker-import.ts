@@ -150,6 +150,17 @@ router.post("/import-list", async (req: Request, res: Response) => {
 
     const entries: TrackerUserListEntry[] = await tracker.getUserList(token);
 
+    // SAFETY: An empty list almost always means the tracker API failed or is down.
+    // Never wipe the local library based on an empty response — bail out instead.
+    if (!entries || entries.length === 0) {
+      const existingCount = (db.prepare("SELECT COUNT(*) as c FROM anime").get() as { c: number }).c;
+      if (existingCount > 0) {
+        console.warn("[import-list] Tracker returned empty list but local library is not empty — skipping import to avoid data loss");
+        res.status(503).json({ error: "Tracker returned no data (likely down). Library preserved.", synced: 0, skipped: true });
+        return;
+      }
+    }
+
     // Determine which DB column holds this tracker's ID
     const trackerIdCol = trackerName === "mal" ? "mal_id" : "anilist_id";
 

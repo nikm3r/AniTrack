@@ -84,7 +84,7 @@ interface EpisodeFlyoutProps {
   onLaunch: (filePath: string, forSync: boolean) => void;
 }
 
-const EpisodeFlyout = React.memo(function EpisodeFlyout({
+const EpisodeFlyout = function EpisodeFlyout({
   visible, forSync, pos, files, loadingFiles, totalEpisodes, onMouseEnter, onMouseLeave, onLaunch,
 }: EpisodeFlyoutProps) {
   const sortedFiles = files
@@ -92,6 +92,7 @@ const EpisodeFlyout = React.memo(function EpisodeFlyout({
     : [];
 
   const flipLeft = pos.x + 240 + 384 + 8 > window.innerWidth;
+  // flipUp: if menu top + flyout height > screen height, open upward
   const flipUp = pos.y + 480 > window.innerHeight;
 
   return (
@@ -124,7 +125,7 @@ const EpisodeFlyout = React.memo(function EpisodeFlyout({
       ))}
     </div>
   );
-});
+}
 
 // ─── Main ContextMenu ──────────────────────────────────────────────────────────
 
