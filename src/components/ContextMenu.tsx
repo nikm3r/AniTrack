@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Play, Users, Search, Tag, SlidersHorizontal, ChevronRight,
   MonitorPlay, CheckCircle, PauseCircle, XCircle, BookmarkPlus, Check, X, Trash2,
@@ -84,6 +84,19 @@ interface EpisodeFlyoutProps {
   onLaunch: (filePath: string, forSync: boolean) => void;
 }
 
+// Shift an absolutely-positioned flyout vertically so it stays fully inside the window.
+// Mutates the element style directly (no re-render → scroll position is kept).
+function clampToViewport(el: HTMLElement | null) {
+  if (!el) return;
+  el.style.transform = "";
+  const r = el.getBoundingClientRect();
+  const M = 8;
+  let dy = 0;
+  if (r.bottom > window.innerHeight - M) dy = window.innerHeight - M - r.bottom;
+  if (r.top + dy < M) dy = M - r.top;
+  if (dy !== 0) el.style.transform = `translateY(${dy}px)`;
+}
+
 const EpisodeFlyout = function EpisodeFlyout({
   visible, forSync, pos, files, loadingFiles, totalEpisodes, onMouseEnter, onMouseLeave, onLaunch,
 }: EpisodeFlyoutProps) {
@@ -92,18 +105,22 @@ const EpisodeFlyout = function EpisodeFlyout({
     : [];
 
   const flipLeft = pos.x + 240 + 384 + 8 > window.innerWidth;
-  // flipUp: if menu top + flyout height > screen height, open upward
-  const flipUp = pos.y + 480 > window.innerHeight;
+  const flyRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    if (visible) clampToViewport(flyRef.current);
+  }, [visible, loadingFiles, files]);
 
   return (
     <div
+      ref={flyRef}
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
       className="absolute w-96 bg-zinc-900 border border-white/10 rounded-xl shadow-2xl shadow-black/60 py-1.5 z-[902]"
       style={{
         ...(flipLeft ? { right: "100%", left: "auto", marginRight: "6px" } : { left: "100%", marginLeft: "6px" }),
-        ...(flipUp ? { bottom: 0, top: "auto" } : { top: 0, bottom: "auto" }),
-        maxHeight: "min(70vh, 480px)",
+        top: 0,
+        maxHeight: "calc(100vh - 16px)",
         overflowY: "auto",
         visibility: visible ? "visible" : "hidden",
         pointerEvents: visible ? "auto" : "none",
@@ -235,13 +252,13 @@ export default function ContextMenu({ x, y, anime, onClose, onUpdate, onRemove, 
 
   const StatusFlyout = () => {
     const flipLeft = pos.x + 240 + 208 + 8 > window.innerWidth;
-    const flipUp = pos.y + 200 > window.innerHeight;
     return (
       <div
+        ref={clampToViewport}
         onMouseEnter={() => showItem("status")}
         onMouseLeave={hideItem}
         className={`absolute w-52 bg-zinc-900 border border-white/10 rounded-xl shadow-2xl shadow-black/60 py-1.5 z-[902] ${flipLeft ? "right-full mr-1.5" : "left-full ml-1.5"}`}
-        style={flipUp ? { bottom: 0, top: "auto" } : { top: 0, bottom: "auto" }}
+        style={{ top: 0 }}
       >
         {STATUS_ITEMS.map(s => (
           <button key={s.value} onClick={() => handleSetStatus(s.value)}
