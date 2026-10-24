@@ -55,6 +55,9 @@ jobs:
         run: |
           mkdir -p /tmp/arch-build
           cp PKGBUILD /tmp/arch-build/
+          sed -i "s/^pkgver=.*/pkgver=${GITHUB_REF_NAME#v}/" /tmp/arch-build/PKGBUILD
+          sed -i "s/^pkgrel=.*/pkgrel=1/" /tmp/arch-build/PKGBUILD
+          grep -E "^(pkgver|pkgrel)=" /tmp/arch-build/PKGBUILD
           chown -R builder:builder /tmp/arch-build
           cd /tmp/arch-build && su builder -c "makepkg -s --noconfirm --skippgpcheck"
       - name: Upload
